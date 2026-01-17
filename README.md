@@ -2,7 +2,7 @@
 
 **Native OPNsense Plugin: Kea DHCP to Unbound DNS Registration**
 
-This plugin bridges the gap between the Kea DHCP server (v4 & v6) and Unbound DNS on OPNsense. It automatically registers hostnames for DHCP clients into the Unbound DNS subsystem, restoring the dynamic DNS registration functionality previously available in the legacy ISC DHCP server.
+This plugin bridges the gap between the Kea DHCP server (ipv4 & ipv6) and Unbound DNS on OPNsense. It automatically registers hostnames for DHCP clients into the Unbound DNS subsystem, restoring the dynamic DNS registration functionality previously available in the legacy ISC DHCP server.
 
 ## Features
 
