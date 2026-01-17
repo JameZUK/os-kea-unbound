@@ -12,6 +12,8 @@ This plugin bridges the gap between the Kea DHCP server (v4 & v6) and Unbound DN
 * **Smart Hostnames:** Automatically generates hostnames from MAC addresses or DUIDs if the client device does not provide one.
 * **System Domain Fallback:** Correctly assigns the system domain (e.g., `int.yourdomain.co.uk`) to leases, preventing generic `home.arpa` entries.
 * **Non-Destructive:** Uses OPNsense's native hook system to inject configuration safely without modifying core system files.
+  
+<img width="1804" height="997" alt="Screenshot From 2026-01-17 17-43-58" src="https://github.com/user-attachments/assets/0bbc7bc4-bd0f-469d-aa2b-1108f91b44f6" />
 
 ## Prerequisites
 
