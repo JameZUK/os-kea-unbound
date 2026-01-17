@@ -100,3 +100,7 @@ This will automatically remove the hook script and restore the original Kea conf
 ## License
 
 BSD 2-Clause License. See the `LICENSE` file for details.
+
+## Acknowledgements
+
+Based on the discussion and concepts in [OPNsense Core Issue #7475](https://github.com/opnsense/core/issues/7475).
