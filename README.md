@@ -35,7 +35,7 @@ You can install the pre-compiled package directly via the OPNsense shell (SSH).
 2.  Run the following command (replace URL with the latest release):
 
 ```sh
-pkg add [https://github.com/JameZUK/os-kea-unbound/releases/download/v3.2/os-kea-unbound-3.2.pkg](https://github.com/JameZUK/os-kea-unbound/releases/download/v3.2/os-kea-unbound-3.2.pkg)
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/25.7.11_1A/os-kea-unbound-3.2.pkg
 ```
 
 *Note: You may see a "misconfigured" warning next to the plugin in the OPNsense web interface. This is cosmetic and expected when installing packages manually outside of a signed repository.*
