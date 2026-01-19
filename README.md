@@ -6,10 +6,10 @@ This plugin bridges the gap between the Kea DHCP server (IPv4 & IPv6) and Unboun
 
 ## Features
 
-* **Smart Update Logic:** Intelligently handles Dual-Stack environments. It preserves existing IPv4 records when adding IPv6 (and vice versa), eliminating race conditions.
-* **Partial Cleanup:** Safely removes expired leases for one IP version without deleting the active record for the other.
-* **Native UI Integration:** Adds a simple configuration checkbox directly into the Kea DHCPv4 and DHCPv6 settings pages.
-* **Dedicated Logging:** Writes detailed, timestamped activity logs to `/var/log/kea-unbound.log` for clear visibility and troubleshooting.
+* **Smart Update Logic:** Intelligently handles dual-stack environments. It preserves existing IPv4 records when adding IPv6 (and vice versa), eliminating race conditions.
+* **Automatic PTR Generation:** Automatically generates reverse DNS (Pointer) records in both standard and `in-addr.arpa` formats.
+* **Persistence & Repair:** Includes `rc.syshook.d` scripts to ensure patches survive OPNsense firmware updates and system reboots.
+* **Dedicated Logging:** Writes detailed, timestamped activity logs to `/var/log/kea-unbound.log` with automatic rotation via `newsyslog`.
 * **Smart Hostnames:** Automatically generates hostnames from MAC addresses or DUIDs if the client device does not provide one.
 * **Non-Destructive:** Uses OPNsense's native hook system to inject configuration safely without modifying core system files.
 
@@ -32,10 +32,10 @@ Before installing, ensure the following services are enabled in OPNsense:
 You can install the pre-compiled package directly via the OPNsense shell (SSH).
 
 1.  Log in to your OPNsense router via SSH.
-2.  Run the following command (replace URL with the latest release):
+2.  Run the following command:
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/25.7.11_1A/os-kea-unbound-3.2.pkg
+pkg add [https://github.com/JameZUK/os-kea-unbound/releases/download/3.3.9/os-kea-unbound-3.3.9.pkg](https://github.com/JameZUK/os-kea-unbound/releases/download/3.3.9/os-kea-unbound-3.3.9.pkg)
 ```
 
 *Note: You may see a "misconfigured" warning next to the plugin in the OPNsense web interface. This is cosmetic and expected when installing packages manually outside of a signed repository.*
@@ -43,14 +43,14 @@ pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/25.7.11_1A/o
 ### Option 2: Build from Source
 If you prefer to build the package yourself:
 
-1.  Download the `build_package.sh` script from this repository.
+1.  Download the `build_plugin.sh` script from this repository.
 2.  Upload the script to your OPNsense router.
 3.  Run the following commands:
 
 ```sh
-chmod +x build_package.sh
-./build_package.sh
-pkg add ./os-kea-unbound-3.2.pkg
+chmod +x build_plugin.sh
+./build_plugin.sh
+pkg add ./os-kea-unbound-3.3.9.pkg
 ```
 
 ## Configuration
@@ -77,23 +77,27 @@ The plugin will immediately begin processing lease events.
 
 ## Verification
 
-Unlike legacy scripts that wrote to a text file, this plugin injects records directly into Unbound's memory for immediate availability.
-
 ### 1. Check the Log File
-The plugin writes to its own dedicated log file. Watch it to see real-time updates:
+Watch the dedicated log file for real-time updates:
 
 ```sh
 tail -f /var/log/kea-unbound.log
 ```
 *Output Example:*
 ```text
-2026-01-18 12:51:24 [info] Added A for test-device.int.domain.co.uk (192.168.1.50)
-2026-01-18 12:51:24 [debug] Preserved A for test-device.int.domain.co.uk (192.168.1.50)
-2026-01-18 12:51:24 [info] Added AAAA for test-device.int.domain.co.uk (2001:db8::100)
+2026-01-19 18:42:05 [info] Added AAAA for photoframe.int.jmuk.co.uk (2a11:2646:114b::1006)
+2026-01-19 18:42:08 [info] Added A for radiatordiningroom.int.jmuk.co.uk (172.16.34.101)
 ```
 
-### 2. Query Unbound Directly
-Check if a specific host is resolvable in the live system:
+### 2. Run Health Check
+A diagnostic script is provided to validate the installation:
+
+```sh
+./healthcheck.sh
+```
+
+### 3. Query Unbound Directly
+Check if a host is resolvable in the live system:
 
 ```sh
 unbound-control -c /var/unbound/unbound.conf list_local_data | grep "my-device"
@@ -107,7 +111,7 @@ To remove the plugin and revert all changes:
 pkg delete os-kea-unbound
 ```
 
-This will automatically remove the hook script, the log file, and restore the original Kea configuration files. You should restart the Kea services after uninstallation.
+This will automatically remove the hook script, rotation configuration, and restore the original Kea configuration files. You should restart the Kea services after uninstallation.
 
 ## License
 
