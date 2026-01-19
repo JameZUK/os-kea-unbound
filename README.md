@@ -34,6 +34,7 @@ You can install the pre-compiled package directly via the OPNsense shell (SSH).
 1.  Log in to your OPNsense router via SSH.
 2.  Run the following command:
 
+
 ```sh
 pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/25.7.11_Fixes/os-kea-unbound-3.3.9.pkg
 ```
@@ -75,6 +76,53 @@ Once installed, you must enable the registration feature in the Kea settings.
 
 The plugin will immediately begin processing lease events.
 
+## Upgrading
+
+To prevent configuration conflicts or service crashes during an upgrade, follow this "Clean Upgrade" procedure.
+
+1.  **Disable Hooks:**
+    * Navigate to **Services > Kea DHCP > Settings**.
+    * **Uncheck** the "Register Leases in Unbound" box and click **Save**.
+    * *This safely detaches the hook from Kea configuration files.*
+
+2.  **Replace Package:**
+    * Log in via SSH and run:
+    ```sh
+    pkg delete os-kea-unbound
+    pkg add ./os-kea-unbound-3.3.9.pkg
+    ```
+
+3.  **Re-Enable Hooks:**
+    * Return to **Services > Kea DHCP > Settings**.
+    * **Check** the "Register Leases in Unbound" box and click **Save**.
+    * Restart the Kea services.
+
+## Troubleshooting & Recovery
+
+If Kea fails to start after an upgrade (e.g., due to a lingering invalid path), use these recovery methods.
+
+### 1. Manual Bypass (CLI)
+If the web interface is inaccessible or Kea is crashing, run these commands via SSH to surgically remove the hook configuration. This will allow Kea to start without the plugin.
+
+```sh
+sed -i '' '/"hooks-libraries"/,/\]/d' /usr/local/etc/kea/kea-dhcp4.conf
+sed -i '' '/"hooks-libraries"/,/\]/d' /usr/local/etc/kea/kea-dhcp6.conf
+service kea-dhcp4 restart
+service kea-dhcp6 restart
+```
+
+### 2. Restore Configuration
+If the OPNsense configuration is corrupted, you can restore a previous backup from the console:
+1.  Access the console (SSH or physical screen).
+2.  Select **Option 13** (Restore a backup).
+3.  Select a configuration timestamped prior to the failed upgrade.
+
+### 3. Factory Reset
+In the event of a total lockout where no other method works:
+1.  Access the console.
+2.  Select **Option 4** (Reset to factory defaults).
+3.  Once the system reboots (default IP: 192.168.1.1), restore your configuration via the Web GUI.
+
 ## Verification
 
 ### 1. Check the Log File
@@ -100,7 +148,7 @@ A diagnostic script is provided to validate the installation:
 Check if a host is resolvable in the live system:
 
 ```sh
-unbound-control -c /var/unbound/unbound.conf list_local_data | grep "my-device"
+unbound-control -c /var/unbound/unbound.conf list_local_data | grep "smart-device"
 ```
 
 ## Uninstallation
