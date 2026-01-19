@@ -85,8 +85,8 @@ tail -f /var/log/kea-unbound.log
 ```
 *Output Example:*
 ```text
-2026-01-19 18:42:05 [info] Added AAAA for photoframe.int.jmuk.co.uk (2a11:2646:114b::1006)
-2026-01-19 18:42:08 [info] Added A for radiatordiningroom.int.jmuk.co.uk (172.16.34.101)
+2026-01-19 18:42:05 [info] Added AAAA for client-device.example.com (2001:db8::1001)
+2026-01-19 18:42:08 [info] Added A for smart-device.example.com (192.168.1.10)
 ```
 
 ### 2. Run Health Check
