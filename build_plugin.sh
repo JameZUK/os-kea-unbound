@@ -115,7 +115,7 @@ echo "$HOOK_CONTENT" > "${BOOT_HOOK_DIR}/50-keaunbound-repair"
 chmod 755 "${UPDATE_HOOK_DIR}/50-keaunbound-repair" "${BOOT_HOOK_DIR}/50-keaunbound-repair"
 
 cat << EOF > "${LOG_ROT_DIR}/keaunbound.conf"
-/var/log/kea-unbound.log                666  7     500  * J
+/var/log/kea-unbound.log                644  7     500  * J
 EOF
 
 # --- 4. Registration ---
@@ -127,7 +127,7 @@ cat << EOF > "${BUILD_DIR}/+POST_INSTALL"
 mkdir -p /usr/local/share/kea/scripts
 chmod 755 /usr/local/share/kea /usr/local/share/kea/scripts
 touch /var/log/kea-unbound.log
-chmod 666 /var/log/kea-unbound.log
+chmod 644 /var/log/kea-unbound.log
 /usr/local/bin/python3 -c '$PATCH_CMD'
 rm -rf /var/cache/opnsense/volt/*
 /usr/sbin/service configd restart
