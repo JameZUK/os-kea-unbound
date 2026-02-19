@@ -133,8 +133,8 @@ tail -f /var/log/kea-unbound.log
 ```
 *Output Example:*
 ```text
-2026-01-19 18:42:05 [info] Added AAAA for client-device.example.com (2001:db8::1001)
-2026-01-19 18:42:08 [info] Added A for smart-device.example.com (192.168.1.10)
+2026-01-19 18:42:05 [info] Added AAAA for client-device.example.com (2001:db8::1001) [PTR: 1.0.0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa]
+2026-01-19 18:42:08 [info] Added A for smart-device.example.com (192.168.1.10) [PTR: 10.1.168.192.in-addr.arpa]
 ```
 
 ### 2. Run Health Check
