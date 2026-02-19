@@ -27,10 +27,19 @@ echo "-----------------------------------------------------"
 
 # --- HELPER FUNCTIONS ---
 
+reverse_ipv4() { echo "$1" | awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}'; }
+reverse_ipv6() { /usr/local/bin/python3 -c "import ipaddress,sys; print(ipaddress.ip_address(sys.argv[1]).reverse_pointer)" "$1"; }
+
+IP4_PTR=$(reverse_ipv4 "$IP4")
+IP6_PTR=$(reverse_ipv6 "$IP6")
+
 clean_slate() {
     unset LEASE4_ADDRESS LEASE4_HOSTNAME LEASE4_HWADDR
     unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
     unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+    unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
+    unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP6_PTR" >/dev/null 2>&1
+    # Also clean up any old-style raw IP entries from previous versions
     unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4" >/dev/null 2>&1
     unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP6" >/dev/null 2>&1
 }
@@ -50,7 +59,7 @@ assert_exists() {
 
 assert_missing() {
     TYPE=$1
-    IP=$2 
+    IP=$2
     RES=$(drill -Q -t $TYPE "$FQDN" @127.0.0.1 | grep -v "^;" | grep -v "^$")
     if [ -z "$RES" ]; then
         printf "${GREEN}[PASS]${NC} $TYPE record correctly removed.\n"
@@ -64,6 +73,29 @@ assert_missing() {
              printf "${RED}[FAIL]${NC} $TYPE record STILL EXISTS!\n"
              exit 1
         fi
+    fi
+}
+
+assert_ptr_exists() {
+    local IP="$1" EXPECTED="$2"
+    local RES=$(drill -Q -x "$IP" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | head -n 1)
+    if echo "$RES" | grep -qi "$EXPECTED"; then
+        printf "${GREEN}[PASS]${NC} PTR record for $IP -> $EXPECTED\n"
+    else
+        printf "${RED}[FAIL]${NC} MISSING PTR for $IP (expected $EXPECTED, got: $RES)\n"
+        drill -x "$IP" @127.0.0.1
+        exit 1
+    fi
+}
+
+assert_ptr_missing() {
+    local IP="$1"
+    local RES=$(drill -Q -x "$IP" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | head -n 1)
+    if [ -z "$RES" ]; then
+        printf "${GREEN}[PASS]${NC} PTR record for $IP correctly removed.\n"
+    else
+        printf "${RED}[FAIL]${NC} PTR for $IP STILL EXISTS: $RES\n"
+        exit 1
     fi
 }
 
@@ -96,9 +128,12 @@ printf "\n${YELLOW}TEST 1: IPv4 Single Stack Lifecycle${NC}\n"
 clean_slate
 trigger_v4 "leases4_committed"
 assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
 assert_missing "AAAA"
+assert_ptr_missing "$IP6"
 trigger_v4 "lease4_release"
 assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
 assert_missing "AAAA"
 
 # --- TEST 2 ---
@@ -106,9 +141,12 @@ printf "\n${YELLOW}TEST 2: IPv6 Single Stack Lifecycle${NC}\n"
 clean_slate
 trigger_v6 "leases6_committed"
 assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
 assert_missing "A"
+assert_ptr_missing "$IP4"
 trigger_v6 "lease6_release"
 assert_missing "AAAA" "$IP6"
+assert_ptr_missing "$IP6"
 assert_missing "A"
 
 # --- TEST 3 ---
@@ -117,16 +155,22 @@ printf "${YELLOW}        Validates that adding v6 PRESERVES v4${NC}\n"
 clean_slate
 trigger_v4 "leases4_committed"
 assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
 trigger_v6 "leases6_committed"
 assert_exists "AAAA" "$IP6"
-assert_exists "A" "$IP4"   
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+assert_ptr_exists "$IP6" "$FQDN"
 
 printf "${YELLOW}        Validates Partial Removal (Remove v4, Keep v6)${NC}\n"
 trigger_v4 "lease4_release"
 assert_missing "A" "$IP4"
-assert_exists "AAAA" "$IP6" 
+assert_ptr_missing "$IP4"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
 trigger_v6 "lease6_release"
 assert_missing "AAAA"
+assert_ptr_missing "$IP6"
 
 # --- TEST 4 ---
 printf "\n${YELLOW}TEST 4: Dual Stack (Order: v6 -> v4)${NC}\n"
@@ -134,16 +178,22 @@ printf "${YELLOW}        Validates that adding v4 PRESERVES v6${NC}\n"
 clean_slate
 trigger_v6 "leases6_committed"
 assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
 trigger_v4 "leases4_committed"
 assert_exists "A" "$IP4"
-assert_exists "AAAA" "$IP6" 
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP4" "$FQDN"
+assert_ptr_exists "$IP6" "$FQDN"
 
 printf "${YELLOW}        Validates Partial Removal (Remove v6, Keep v4)${NC}\n"
 trigger_v6 "lease6_release"
 assert_missing "AAAA" "$IP6"
-assert_exists "A" "$IP4"   
+assert_ptr_missing "$IP6"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
 trigger_v4 "lease4_release"
 assert_missing "A"
+assert_ptr_missing "$IP4"
 
 # ==============================================================================
 printf "\n${GREEN}>>> ALL TESTS PASSED SUCCESSFULLY! <<<${NC}\n"
