@@ -6,11 +6,13 @@ This plugin bridges the gap between the Kea DHCP server (IPv4 & IPv6) and Unboun
 
 ## Features
 
-* **Smart Update Logic:** Intelligently handles dual-stack environments. It preserves existing IPv4 records when adding IPv6 (and vice versa), eliminating race conditions.
-* **Automatic PTR Generation:** Automatically generates reverse DNS (Pointer) records in both standard and `in-addr.arpa` formats.
+* **Smart Update Logic:** Intelligently handles dual-stack environments. It preserves existing IPv4 records when adding IPv6 (and vice versa).
+* **Concurrency Safe:** Uses `lockf(1)` serialization to prevent race conditions when concurrent DHCPv4 and DHCPv6 lease events fire for the same host.
+* **Automatic PTR Generation:** Generates reverse DNS (PTR) records for both IPv4 (`in-addr.arpa`) and IPv6 (`ip6.arpa`), with graceful fallback if the PTR computation fails.
+* **Hostname Normalization:** Lowercases hostnames, strips domain suffixes from FQDN inputs, and removes invalid characters to ensure clean DNS entries.
+* **Smart Hostnames:** Automatically generates hostnames from MAC addresses (IPv4) or DUIDs (IPv6) if the client device does not provide one.
 * **Persistence & Repair:** Includes `rc.syshook.d` scripts to ensure patches survive OPNsense firmware updates and system reboots.
 * **Dedicated Logging:** Writes detailed, timestamped activity logs to `/var/log/kea-unbound.log` with automatic rotation via `newsyslog`.
-* **Smart Hostnames:** Automatically generates hostnames from MAC addresses or DUIDs if the client device does not provide one.
 * **Non-Destructive:** Uses OPNsense's native hook system to inject configuration safely without modifying core system files.
 
 <img width="1804" height="997" alt="Screenshot" src="https://github.com/user-attachments/assets/0bbc7bc4-bd0f-469d-aa2b-1108f91b44f6" />
@@ -21,7 +23,8 @@ Before installing, ensure the following services are enabled in OPNsense:
 
 1.  **Kea DHCPv4** and/or **Kea DHCPv6**.
 2.  **Unbound DNS**.
-3.  **Kea Control Agent:** This service **must be enabled** for the plugin to function correctly.
+3.  **Python3** (pre-installed on OPNsense) — required for IPv6 reverse PTR generation.
+4.  **Kea Control Agent:** This service **must be enabled** for the plugin to function correctly.
     * Navigate to **Services > Kea DHCP > Control Agent**.
     * Enable the service and click **Save**.
     * Start/Restart the service.
@@ -138,13 +141,34 @@ tail -f /var/log/kea-unbound.log
 ```
 
 ### 2. Run Health Check
-A diagnostic script is provided to validate the installation:
+A diagnostic script is provided to validate the installation. It performs 7 checks:
+
+1. OPNsense MVC patches (DHCPv4)
+2. OPNsense MVC patches (DHCPv6)
+3. Active Kea configuration
+4. Filesystem (hook script exists and is executable)
+5. Log rotation configuration
+6. Unbound connectivity
+7. Python3 availability (required for IPv6 PTR)
 
 ```sh
 ./healthcheck.sh
 ```
 
-### 3. Query Unbound Directly
+### 3. Run the Test Suite
+A comprehensive regression test suite (`test_hook.sh`) validates the hook script against a live Unbound instance. It covers:
+
+* IPv4 and IPv6 single-stack lifecycles (add/release)
+* Dual-stack preservation in both orders (v4->v6 and v6->v4)
+* Partial removal (removing one stack preserves the other)
+* Hostname normalization (uppercase, FQDN input, special characters)
+* MAC address fallback when hostname is empty
+
+```sh
+./test_hook.sh
+```
+
+### 4. Query Unbound Directly
 Check if a host is resolvable in the live system:
 
 ```sh
