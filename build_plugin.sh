@@ -27,11 +27,24 @@ cat << 'EOF' > "${KEA_SCRIPT_DIR}/kea-unbound-hook.sh"
 #!/bin/sh
 LOG_FILE="/var/log/kea-unbound.log"
 UNBOUND_CONF="/var/unbound/unbound.conf"
+# Serialize concurrent executions to prevent dual-stack race conditions
+if [ -z "$_KEA_UNBOUND_LOCKED" ]; then
+    export _KEA_UNBOUND_LOCKED=1
+    exec lockf -k -t 10 /tmp/kea-unbound.lock "$0" "$@"
+fi
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG_FILE"; }
 normalize_hostname() { echo "$1" | tr 'A-Z' 'a-z' | sed 's/\..*//' | sed 's/[^a-z0-9-]//g'; }
 get_domain() { D=$(hostname -d 2>/dev/null); [ -z "$D" ] && echo "home.arpa" || echo "$D"; }
 reverse_ipv4() { echo "$1" | awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}'; }
-reverse_ipv6() { /usr/local/bin/python3 -c "import ipaddress,sys; print(ipaddress.ip_address(sys.argv[1]).reverse_pointer)" "$1"; }
+reverse_ipv6() {
+    local result
+    result=$(/usr/local/bin/python3 -c "import ipaddress,sys; print(ipaddress.ip_address(sys.argv[1]).reverse_pointer)" "$1" 2>/dev/null)
+    if [ -z "$result" ]; then
+        log error "Failed to compute IPv6 reverse pointer for $1"
+        return 1
+    fi
+    echo "$result"
+}
 get_ptr_name() { [ "$1" = "4" ] && reverse_ipv4 "$2" || reverse_ipv6 "$2"; }
 update_dns_entry() {
     local ACTION="$1" IP="$2" HOST="$3" IP_VER="$4"
@@ -43,18 +56,18 @@ update_dns_entry() {
     local PRESERVED_IP=$(drill -Q -t $OTHER_TYPE "$FQDN" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | awk '{print $NF}' | head -n 1)
     local PTR_NAME=$(get_ptr_name "$IP_VER" "$IP")
     unbound-control -c "$UNBOUND_CONF" local_data_remove "$FQDN" >/dev/null 2>&1
-    unbound-control -c "$UNBOUND_CONF" local_data_remove "$PTR_NAME" >/dev/null 2>&1
+    [ -n "$PTR_NAME" ] && unbound-control -c "$UNBOUND_CONF" local_data_remove "$PTR_NAME" >/dev/null 2>&1
     if [ "$ACTION" = "add" ]; then
         unbound-control -c "$UNBOUND_CONF" local_data "$FQDN IN $THIS_TYPE $IP" >/dev/null 2>&1
-        unbound-control -c "$UNBOUND_CONF" local_data "$PTR_NAME PTR $FQDN" >/dev/null 2>&1
-        log info "Added $THIS_TYPE for $FQDN ($IP) [PTR: $PTR_NAME]"
+        [ -n "$PTR_NAME" ] && unbound-control -c "$UNBOUND_CONF" local_data "$PTR_NAME PTR $FQDN" >/dev/null 2>&1
+        log info "Added $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
     else
-        log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: $PTR_NAME]"
+        log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
     fi
     if [ -n "$PRESERVED_IP" ]; then
         local PRES_PTR=$(get_ptr_name "$OTHER_VER" "$PRESERVED_IP")
         unbound-control -c "$UNBOUND_CONF" local_data "$FQDN IN $OTHER_TYPE $PRESERVED_IP" >/dev/null 2>&1
-        unbound-control -c "$UNBOUND_CONF" local_data "$PRES_PTR PTR $FQDN" >/dev/null 2>&1
+        [ -n "$PRES_PTR" ] && unbound-control -c "$UNBOUND_CONF" local_data "$PRES_PTR PTR $FQDN" >/dev/null 2>&1
     fi
 }
 if [ -n "$LEASE4_ADDRESS" ]; then
