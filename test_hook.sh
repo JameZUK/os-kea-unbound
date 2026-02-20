@@ -242,11 +242,13 @@ assert_missing "A" "$IP4"
 printf "${YELLOW}  5c: Special characters stripped${NC}\n"
 FQDN="teststress.$DOMAIN"
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
 trigger_v4_raw "leases4_committed" "test_stress!@#"
 assert_exists "A" "$IP4"
 assert_ptr_exists "$IP4" "$FQDN"
 trigger_v4_raw "lease4_release" "test_stress!@#"
 assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
 
 # --- TEST 6 ---
@@ -254,11 +256,13 @@ printf "\n${YELLOW}TEST 6: MAC Address Fallback (Empty Hostname)${NC}\n"
 MAC_HOST="device-$(echo "$MAC" | tr ':' '-')"
 FQDN="$MAC_HOST.$DOMAIN"
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
 trigger_v4_raw "leases4_committed" ""
 assert_exists "A" "$IP4"
 assert_ptr_exists "$IP4" "$FQDN"
 trigger_v4_raw "lease4_release" ""
 assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
 
 # Restore defaults

@@ -2,7 +2,7 @@
 
 # 1. Define Variables
 PLUGIN_NAME="os-kea-unbound"
-VERSION="3.3.9" 
+VERSION="3.4.0"
 BUILD_DIR="./${PLUGIN_NAME}_build"
 STAGE_DIR="${BUILD_DIR}/stage"
 
