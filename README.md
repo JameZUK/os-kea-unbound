@@ -39,7 +39,7 @@ You can install the pre-compiled package directly via the OPNsense shell (SSH).
 
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/25.7.11_Fixes/os-kea-unbound-3.3.9.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/25.7.11_Fixes/os-kea-unbound-3.4.0.pkg
 ```
 
 *Note: You may see a "misconfigured" warning next to the plugin in the OPNsense web interface. This is cosmetic and expected when installing packages manually outside of a signed repository.*
@@ -54,7 +54,7 @@ If you prefer to build the package yourself:
 ```sh
 chmod +x build_plugin.sh
 ./build_plugin.sh
-pkg add ./os-kea-unbound-3.3.9.pkg
+pkg add ./os-kea-unbound-3.4.0.pkg
 ```
 
 ## Configuration
@@ -92,7 +92,7 @@ To prevent configuration conflicts or service crashes during an upgrade, follow 
     * Log in via SSH and run:
     ```sh
     pkg delete os-kea-unbound
-    pkg add ./os-kea-unbound-3.3.9.pkg
+    pkg add ./os-kea-unbound-3.4.0.pkg
     ```
 
 3.  **Re-Enable Hooks:**
@@ -141,15 +141,18 @@ tail -f /var/log/kea-unbound.log
 ```
 
 ### 2. Run Health Check
-A diagnostic script is provided to validate the installation. It performs 7 checks:
+A diagnostic script is provided to validate the installation. It performs 10 checks:
 
 1. OPNsense MVC patches (DHCPv4)
 2. OPNsense MVC patches (DHCPv6)
 3. Active Kea configuration
-4. Filesystem (hook script exists and is executable)
-5. Log rotation configuration
-6. Unbound connectivity
-7. Python3 availability (required for IPv6 PTR)
+4. Hook script (exists and is executable)
+5. Plugin registration (`keaunbound.inc`)
+6. Persistence hooks (update + boot repair scripts)
+7. Log rotation configuration
+8. Unbound connectivity
+9. Python3 availability (required for IPv6 PTR)
+10. `drill` command (required for dual-stack preservation)
 
 ```sh
 ./healthcheck.sh
