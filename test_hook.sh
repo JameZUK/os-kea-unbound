@@ -25,6 +25,17 @@ echo ">>> TARGET: $FQDN"
 echo ">>> HOOK:   $HOOK_SCRIPT"
 echo "-----------------------------------------------------"
 
+# --- PREREQUISITES ---
+printf "Checking python3... "
+if /usr/local/bin/python3 -c "import ipaddress" 2>/dev/null; then
+    printf "OK\n"
+else
+    printf "FAILED\n"
+    echo "ERROR: python3 with ipaddress module is required at /usr/local/bin/python3"
+    echo "IPv6 PTR tests will produce incorrect results without it."
+    exit 1
+fi
+
 # --- HELPER FUNCTIONS ---
 
 reverse_ipv4() { echo "$1" | awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}'; }
@@ -106,6 +117,16 @@ trigger_v4() {
     export LEASE4_HWADDR="$MAC"
     unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
     printf " -> Triggering IPv4 $ACTION...\n"
+    $HOOK_SCRIPT "$ACTION" >/dev/null
+}
+
+trigger_v4_raw() {
+    local ACTION="$1" CUSTOM_HOST="$2"
+    export LEASE4_ADDRESS="$IP4"
+    export LEASE4_HOSTNAME="$CUSTOM_HOST"
+    export LEASE4_HWADDR="$MAC"
+    unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
+    printf " -> Triggering IPv4 $ACTION (hostname='$CUSTOM_HOST')...\n"
     $HOOK_SCRIPT "$ACTION" >/dev/null
 }
 
@@ -194,6 +215,55 @@ assert_ptr_exists "$IP4" "$FQDN"
 trigger_v4 "lease4_release"
 assert_missing "A"
 assert_ptr_missing "$IP4"
+
+# --- TEST 5 ---
+printf "\n${YELLOW}TEST 5: Hostname Normalization${NC}\n"
+
+printf "${YELLOW}  5a: Uppercase hostname -> lowercase${NC}\n"
+HOST="TEST-STRESS"
+FQDN="test-stress.$DOMAIN"
+clean_slate
+trigger_v4_raw "leases4_committed" "TEST-STRESS"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+trigger_v4_raw "lease4_release" "TEST-STRESS"
+assert_missing "A" "$IP4"
+
+printf "${YELLOW}  5b: FQDN input -> stripped to hostname${NC}\n"
+HOST="test-stress"
+FQDN="test-stress.$DOMAIN"
+clean_slate
+trigger_v4_raw "leases4_committed" "test-stress.example.com"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+trigger_v4_raw "lease4_release" "test-stress.example.com"
+assert_missing "A" "$IP4"
+
+printf "${YELLOW}  5c: Special characters stripped${NC}\n"
+FQDN="teststress.$DOMAIN"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+trigger_v4_raw "leases4_committed" "test_stress!@#"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+trigger_v4_raw "lease4_release" "test_stress!@#"
+assert_missing "A" "$IP4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+
+# --- TEST 6 ---
+printf "\n${YELLOW}TEST 6: MAC Address Fallback (Empty Hostname)${NC}\n"
+MAC_HOST="device-$(echo "$MAC" | tr ':' '-')"
+FQDN="$MAC_HOST.$DOMAIN"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+trigger_v4_raw "leases4_committed" ""
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+trigger_v4_raw "lease4_release" ""
+assert_missing "A" "$IP4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+
+# Restore defaults
+HOST="test-stress"
+FQDN="$HOST.$DOMAIN"
 
 # ==============================================================================
 printf "\n${GREEN}>>> ALL TESTS PASSED SUCCESSFULLY! <<<${NC}\n"
