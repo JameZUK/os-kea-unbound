@@ -44,9 +44,17 @@ reverse_ipv6() { /usr/local/bin/python3 -c "import ipaddress,sys; print(ipaddres
 IP4_PTR=$(reverse_ipv4 "$IP4")
 IP6_PTR=$(reverse_ipv6 "$IP6")
 
-clean_slate() {
+clean_env() {
     unset LEASE4_ADDRESS LEASE4_HOSTNAME LEASE4_HWADDR
     unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
+    unset LEASES4_SIZE LEASES4_AT0_ADDRESS LEASES4_AT0_HOSTNAME LEASES4_AT0_HWADDR
+    unset LEASES6_SIZE LEASES6_AT0_ADDRESS LEASES6_AT0_HOSTNAME LEASES6_AT0_DUID
+    unset DELETED_LEASES4_SIZE DELETED_LEASES4_AT0_ADDRESS DELETED_LEASES4_AT0_HOSTNAME DELETED_LEASES4_AT0_HWADDR
+    unset DELETED_LEASES6_SIZE DELETED_LEASES6_AT0_ADDRESS DELETED_LEASES6_AT0_HOSTNAME DELETED_LEASES6_AT0_DUID
+}
+
+clean_slate() {
+    clean_env
     unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
     unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
     unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP6_PTR" >/dev/null 2>&1
@@ -110,32 +118,79 @@ assert_ptr_missing() {
     fi
 }
 
+_set_v4_vars() {
+    local ACTION="$1" CUSTOM_HOST="$2"
+    case "$ACTION" in
+        leases4_committed)
+            export LEASES4_SIZE=1
+            export LEASES4_AT0_ADDRESS="$IP4"
+            export LEASES4_AT0_HOSTNAME="$CUSTOM_HOST"
+            export LEASES4_AT0_HWADDR="$MAC"
+            ;;
+        *)
+            export LEASE4_ADDRESS="$IP4"
+            export LEASE4_HOSTNAME="$CUSTOM_HOST"
+            export LEASE4_HWADDR="$MAC"
+            ;;
+    esac
+}
+
+_set_v6_vars() {
+    local ACTION="$1" CUSTOM_HOST="$2"
+    case "$ACTION" in
+        leases6_committed)
+            export LEASES6_SIZE=1
+            export LEASES6_AT0_ADDRESS="$IP6"
+            export LEASES6_AT0_HOSTNAME="$CUSTOM_HOST"
+            export LEASES6_AT0_DUID="$DUID"
+            ;;
+        *)
+            export LEASE6_ADDRESS="$IP6"
+            export LEASE6_HOSTNAME="$CUSTOM_HOST"
+            export LEASE6_DUID="$DUID"
+            ;;
+    esac
+}
+
 trigger_v4() {
     ACTION=$1
-    export LEASE4_ADDRESS="$IP4"
-    export LEASE4_HOSTNAME="$HOST"
-    export LEASE4_HWADDR="$MAC"
-    unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
+    clean_env
+    _set_v4_vars "$ACTION" "$HOST"
     printf " -> Triggering IPv4 $ACTION...\n"
     $HOOK_SCRIPT "$ACTION" >/dev/null
 }
 
 trigger_v4_raw() {
     local ACTION="$1" CUSTOM_HOST="$2"
-    export LEASE4_ADDRESS="$IP4"
-    export LEASE4_HOSTNAME="$CUSTOM_HOST"
-    export LEASE4_HWADDR="$MAC"
-    unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
+    clean_env
+    _set_v4_vars "$ACTION" "$CUSTOM_HOST"
     printf " -> Triggering IPv4 $ACTION (hostname='$CUSTOM_HOST')...\n"
     $HOOK_SCRIPT "$ACTION" >/dev/null
 }
 
+trigger_v4_committed_with_deleted() {
+    local ADD_IP="$1" DEL_IP="$2"
+    clean_env
+    export LEASES4_SIZE=1
+    export LEASES4_AT0_ADDRESS="$ADD_IP"
+    export LEASES4_AT0_HOSTNAME="$HOST"
+    export LEASES4_AT0_HWADDR="$MAC"
+    if [ -n "$DEL_IP" ]; then
+        export DELETED_LEASES4_SIZE=1
+        export DELETED_LEASES4_AT0_ADDRESS="$DEL_IP"
+        export DELETED_LEASES4_AT0_HOSTNAME="$HOST"
+        export DELETED_LEASES4_AT0_HWADDR="$MAC"
+        printf " -> Triggering IPv4 leases4_committed (add=$ADD_IP, deleted=$DEL_IP)...\n"
+    else
+        printf " -> Triggering IPv4 leases4_committed (add=$ADD_IP)...\n"
+    fi
+    $HOOK_SCRIPT leases4_committed >/dev/null
+}
+
 trigger_v6() {
     ACTION=$1
-    export LEASE6_ADDRESS="$IP6"
-    export LEASE6_HOSTNAME="$HOST"
-    export LEASE6_DUID="$DUID"
-    unset LEASE4_ADDRESS LEASE4_HOSTNAME LEASE4_HWADDR
+    clean_env
+    _set_v6_vars "$ACTION" "$HOST"
     printf " -> Triggering IPv6 $ACTION...\n"
     $HOOK_SCRIPT "$ACTION" >/dev/null
 }
@@ -268,6 +323,35 @@ unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/nul
 # Restore defaults
 HOST="test-stress"
 FQDN="$HOST.$DOMAIN"
+
+# --- TEST 7 ---
+printf "\n${YELLOW}TEST 7: lease6_rebind Registers AAAA${NC}\n"
+printf "${YELLOW}        Validates that a v6 rebind (not just renew) refreshes DNS${NC}\n"
+clean_slate
+trigger_v6 "lease6_rebind"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
+trigger_v6 "lease6_release"
+assert_missing "AAAA" "$IP6"
+assert_ptr_missing "$IP6"
+
+# --- TEST 8 ---
+printf "\n${YELLOW}TEST 8: leases4_committed with DELETED_LEASES4 (IP reassignment)${NC}\n"
+printf "${YELLOW}        Validates that Kea's DELETED_LEASES4_* entries trigger a remove${NC}\n"
+OLD_IP="192.0.2.200"
+OLD_PTR=$(reverse_ipv4 "$OLD_IP")
+clean_slate
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$OLD_PTR" >/dev/null 2>&1
+# Seed an existing record at OLD_IP so we can confirm it is cleared.
+trigger_v4_committed_with_deleted "$OLD_IP" ""
+assert_exists "A" "$OLD_IP"
+# Now Kea reassigns: commits IP4 for the same host and reports OLD_IP as deleted.
+trigger_v4_committed_with_deleted "$IP4" "$OLD_IP"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+# Cleanup
+trigger_v4 "lease4_release"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$OLD_PTR" >/dev/null 2>&1
 
 # ==============================================================================
 printf "\n${GREEN}>>> ALL TESTS PASSED SUCCESSFULLY! <<<${NC}\n"
