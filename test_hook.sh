@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # ==============================================================================
-# Kea-Unbound Hook: Comprehensive Regression Test Suite (v2)
+# Kea-Unbound Hook: Comprehensive Regression Test Suite (v3)
+# Covers every Kea run_script callout plus real-world edge cases.
 # ==============================================================================
 
 # --- CONFIGURATION ---
@@ -47,10 +48,15 @@ IP6_PTR=$(reverse_ipv6 "$IP6")
 clean_env() {
     unset LEASE4_ADDRESS LEASE4_HOSTNAME LEASE4_HWADDR
     unset LEASE6_ADDRESS LEASE6_HOSTNAME LEASE6_DUID
-    unset LEASES4_SIZE LEASES4_AT0_ADDRESS LEASES4_AT0_HOSTNAME LEASES4_AT0_HWADDR
-    unset LEASES6_SIZE LEASES6_AT0_ADDRESS LEASES6_AT0_HOSTNAME LEASES6_AT0_DUID
-    unset DELETED_LEASES4_SIZE DELETED_LEASES4_AT0_ADDRESS DELETED_LEASES4_AT0_HOSTNAME DELETED_LEASES4_AT0_HWADDR
-    unset DELETED_LEASES6_SIZE DELETED_LEASES6_AT0_ADDRESS DELETED_LEASES6_AT0_HOSTNAME DELETED_LEASES6_AT0_DUID
+    unset LEASES4_SIZE LEASES6_SIZE DELETED_LEASES4_SIZE DELETED_LEASES6_SIZE
+    local i=0
+    while [ $i -lt 4 ]; do
+        unset LEASES4_AT${i}_ADDRESS LEASES4_AT${i}_HOSTNAME LEASES4_AT${i}_HWADDR
+        unset LEASES6_AT${i}_ADDRESS LEASES6_AT${i}_HOSTNAME LEASES6_AT${i}_DUID
+        unset DELETED_LEASES4_AT${i}_ADDRESS DELETED_LEASES4_AT${i}_HOSTNAME DELETED_LEASES4_AT${i}_HWADDR
+        unset DELETED_LEASES6_AT${i}_ADDRESS DELETED_LEASES6_AT${i}_HOSTNAME DELETED_LEASES6_AT${i}_DUID
+        i=$((i + 1))
+    done
 }
 
 clean_slate() {
@@ -193,6 +199,43 @@ trigger_v6() {
     _set_v6_vars "$ACTION" "$HOST"
     printf " -> Triggering IPv6 $ACTION...\n"
     $HOOK_SCRIPT "$ACTION" >/dev/null
+}
+
+trigger_v6_committed_with_deleted() {
+    local ADD_IP="$1" DEL_IP="$2"
+    clean_env
+    export LEASES6_SIZE=1
+    export LEASES6_AT0_ADDRESS="$ADD_IP"
+    export LEASES6_AT0_HOSTNAME="$HOST"
+    export LEASES6_AT0_DUID="$DUID"
+    if [ -n "$DEL_IP" ]; then
+        export DELETED_LEASES6_SIZE=1
+        export DELETED_LEASES6_AT0_ADDRESS="$DEL_IP"
+        export DELETED_LEASES6_AT0_HOSTNAME="$HOST"
+        export DELETED_LEASES6_AT0_DUID="$DUID"
+        printf " -> Triggering IPv6 leases6_committed (add=$ADD_IP, deleted=$DEL_IP)...\n"
+    else
+        printf " -> Triggering IPv6 leases6_committed (add=$ADD_IP)...\n"
+    fi
+    $HOOK_SCRIPT leases6_committed >/dev/null
+}
+
+# Args: "<hostname>|<ip>|<mac>" pairs (| separator to avoid colons in MACs)
+trigger_v4_multi_committed() {
+    clean_env
+    local count=0 triple h ip m
+    for triple in "$@"; do
+        h=$(echo "$triple" | cut -d'|' -f1)
+        ip=$(echo "$triple" | cut -d'|' -f2)
+        m=$(echo "$triple" | cut -d'|' -f3)
+        eval "export LEASES4_AT${count}_ADDRESS=\"\$ip\""
+        eval "export LEASES4_AT${count}_HOSTNAME=\"\$h\""
+        eval "export LEASES4_AT${count}_HWADDR=\"\$m\""
+        count=$((count + 1))
+    done
+    export LEASES4_SIZE=$count
+    printf " -> Triggering IPv4 leases4_committed (%d leases)...\n" "$count"
+    $HOOK_SCRIPT leases4_committed >/dev/null
 }
 
 # ==============================================================================
@@ -353,6 +396,183 @@ assert_ptr_exists "$IP4" "$FQDN"
 trigger_v4 "lease4_release"
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$OLD_PTR" >/dev/null 2>&1
 
+# --- TEST 9 ---
+printf "\n${YELLOW}TEST 9: lease4_renew adds record (belt-and-braces path)${NC}\n"
+clean_slate
+trigger_v4 "lease4_renew"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
+
+# --- TEST 10 ---
+printf "\n${YELLOW}TEST 10: lease4_expire removes record${NC}\n"
+clean_slate
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+trigger_v4 "lease4_expire"
+assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
+
+# --- TEST 11 ---
+printf "\n${YELLOW}TEST 11: lease4_decline removes record${NC}\n"
+clean_slate
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+trigger_v4 "lease4_decline"
+assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
+
+# --- TEST 12 ---
+printf "\n${YELLOW}TEST 12: lease6_renew adds record (belt-and-braces path)${NC}\n"
+clean_slate
+trigger_v6 "lease6_renew"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
+trigger_v6 "lease6_release"
+assert_missing "AAAA" "$IP6"
+assert_ptr_missing "$IP6"
+
+# --- TEST 13 ---
+printf "\n${YELLOW}TEST 13: lease6_expire removes record${NC}\n"
+clean_slate
+trigger_v6 "leases6_committed"
+assert_exists "AAAA" "$IP6"
+trigger_v6 "lease6_expire"
+assert_missing "AAAA" "$IP6"
+assert_ptr_missing "$IP6"
+
+# --- TEST 14 ---
+printf "\n${YELLOW}TEST 14: lease6_decline removes record${NC}\n"
+clean_slate
+trigger_v6 "leases6_committed"
+assert_exists "AAAA" "$IP6"
+trigger_v6 "lease6_decline"
+assert_missing "AAAA" "$IP6"
+assert_ptr_missing "$IP6"
+
+# --- TEST 15 ---
+printf "\n${YELLOW}TEST 15: leases6_committed with DELETED_LEASES6 (IPv6 IP reassignment)${NC}\n"
+OLD_IP6="2001:db8::dead"
+OLD_IP6_PTR=$(reverse_ipv6 "$OLD_IP6")
+clean_slate
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$OLD_IP6_PTR" >/dev/null 2>&1
+# Seed: host at OLD_IP6
+trigger_v6_committed_with_deleted "$OLD_IP6" ""
+assert_exists "AAAA" "$OLD_IP6"
+# Reassign: host now at IP6, Kea reports OLD_IP6 as deleted
+trigger_v6_committed_with_deleted "$IP6" "$OLD_IP6"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
+assert_ptr_missing "$OLD_IP6"
+# Cleanup
+trigger_v6 "lease6_release"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$OLD_IP6_PTR" >/dev/null 2>&1
+
+# --- TEST 16 ---
+printf "\n${YELLOW}TEST 16: Multi-lease leases4_committed (LEASES4_SIZE=2)${NC}\n"
+M_HOST1="multi-a"
+M_HOST2="multi-b"
+M_FQDN1="$M_HOST1.$DOMAIN"
+M_FQDN2="$M_HOST2.$DOMAIN"
+M_IP1="192.0.2.111"
+M_IP2="192.0.2.112"
+M_PTR1=$(reverse_ipv4 "$M_IP1")
+M_PTR2=$(reverse_ipv4 "$M_IP2")
+for n in "$M_FQDN1" "$M_FQDN2" "$M_PTR1" "$M_PTR2"; do
+    unbound-control -c /var/unbound/unbound.conf local_data_remove "$n" >/dev/null 2>&1
+done
+trigger_v4_multi_committed \
+    "$M_HOST1|$M_IP1|aa:aa:aa:aa:aa:01" \
+    "$M_HOST2|$M_IP2|aa:aa:aa:aa:aa:02"
+RES1=$(drill -Q -t A "$M_FQDN1" @127.0.0.1 | grep "$M_IP1")
+RES2=$(drill -Q -t A "$M_FQDN2" @127.0.0.1 | grep "$M_IP2")
+if [ -n "$RES1" ] && [ -n "$RES2" ]; then
+    printf "${GREEN}[PASS]${NC} Both leases registered ($M_FQDN1, $M_FQDN2)\n"
+else
+    printf "${RED}[FAIL]${NC} Multi-lease registration incomplete: host1='%s' host2='%s'\n" "$RES1" "$RES2"
+    exit 1
+fi
+PTR1=$(drill -Q -x "$M_IP1" @127.0.0.1 | grep -i "$M_HOST1")
+PTR2=$(drill -Q -x "$M_IP2" @127.0.0.1 | grep -i "$M_HOST2")
+if [ -n "$PTR1" ] && [ -n "$PTR2" ]; then
+    printf "${GREEN}[PASS]${NC} Both PTR records present\n"
+else
+    printf "${RED}[FAIL]${NC} Multi-lease PTR missing: ptr1='%s' ptr2='%s'\n" "$PTR1" "$PTR2"
+    exit 1
+fi
+for n in "$M_FQDN1" "$M_FQDN2" "$M_PTR1" "$M_PTR2"; do
+    unbound-control -c /var/unbound/unbound.conf local_data_remove "$n" >/dev/null 2>&1
+done
+
+# --- TEST 17 ---
+printf "\n${YELLOW}TEST 17: Dual-stack IP update (v4 changes, v6 preserved)${NC}\n"
+NEW_IP4="192.0.2.177"
+NEW_IP4_PTR=$(reverse_ipv4 "$NEW_IP4")
+clean_slate
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$NEW_IP4_PTR" >/dev/null 2>&1
+# Establish dual-stack
+trigger_v4 "leases4_committed"
+trigger_v6 "leases6_committed"
+assert_exists "A" "$IP4"
+assert_exists "AAAA" "$IP6"
+# v4 address changes for the same host; v6 must survive
+trigger_v4_committed_with_deleted "$NEW_IP4" "$IP4"
+assert_exists "A" "$NEW_IP4"
+assert_missing "A" "$IP4"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$NEW_IP4" "$FQDN"
+assert_ptr_exists "$IP6" "$FQDN"
+assert_ptr_missing "$IP4"
+# Cleanup
+trigger_v4 "lease4_release"
+trigger_v6 "lease6_release"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$NEW_IP4_PTR" >/dev/null 2>&1
+
+# --- TEST 18 ---
+printf "\n${YELLOW}TEST 18: Idempotent release (no prior record)${NC}\n"
+clean_slate
+# Release for a host we never committed -- must not error or corrupt state
+trigger_v4 "lease4_release"
+trigger_v6 "lease6_release"
+# System still responsive: a following commit still works
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+
+# --- TEST 19 ---
+printf "\n${YELLOW}TEST 19: Unknown hook name is a safe no-op${NC}\n"
+clean_slate
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+clean_env
+export LEASE4_ADDRESS="$IP4"
+export LEASE4_HOSTNAME="$HOST"
+export LEASE4_HWADDR="$MAC"
+printf " -> Triggering unknown hook 'nonexistent_callout'...\n"
+if $HOOK_SCRIPT "nonexistent_callout" >/dev/null 2>&1; then
+    printf "${GREEN}[PASS]${NC} Unknown hook exited 0\n"
+else
+    printf "${RED}[FAIL]${NC} Unknown hook exited non-zero\n"
+    exit 1
+fi
+# Existing state must be intact
+assert_exists "A" "$IP4"
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+
+# --- TEST 20 ---
+printf "\n${YELLOW}TEST 20: Empty leases4_committed (LEASES4_SIZE=0) is a no-op${NC}\n"
+clean_slate
+clean_env
+export LEASES4_SIZE=0
+printf " -> Triggering IPv4 leases4_committed with 0 leases...\n"
+$HOOK_SCRIPT leases4_committed >/dev/null
+assert_missing "A" "$IP4"
+assert_ptr_missing "$IP4"
+
 # ==============================================================================
-printf "\n${GREEN}>>> ALL TESTS PASSED SUCCESSFULLY! <<<${NC}\n"
+printf "\n${GREEN}>>> ALL 20 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
 clean_slate

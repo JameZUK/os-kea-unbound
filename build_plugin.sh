@@ -82,20 +82,22 @@ update_dns_entry() {
 host_or_mac_fallback() { if [ -n "$1" ]; then echo "$1"; else echo "device-$(echo "$2" | tr ':' '-')"; fi; }
 case "$1" in
     leases4_committed)
-        i=0; SIZE="${LEASES4_SIZE:-0}"
-        while [ "$i" -lt "$SIZE" ]; do
-            ADDR=$(eval "echo \$LEASES4_AT${i}_ADDRESS")
-            HN=$(eval "echo \$LEASES4_AT${i}_HOSTNAME")
-            HW=$(eval "echo \$LEASES4_AT${i}_HWADDR")
-            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
-            i=$((i + 1))
-        done
+        # Process deletions FIRST so that when the same hostname appears in
+        # both sets (IP reassignment), the final ADD wins.
         i=0; SIZE="${DELETED_LEASES4_SIZE:-0}"
         while [ "$i" -lt "$SIZE" ]; do
             ADDR=$(eval "echo \$DELETED_LEASES4_AT${i}_ADDRESS")
             HN=$(eval "echo \$DELETED_LEASES4_AT${i}_HOSTNAME")
             HW=$(eval "echo \$DELETED_LEASES4_AT${i}_HWADDR")
             update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
+            i=$((i + 1))
+        done
+        i=0; SIZE="${LEASES4_SIZE:-0}"
+        while [ "$i" -lt "$SIZE" ]; do
+            ADDR=$(eval "echo \$LEASES4_AT${i}_ADDRESS")
+            HN=$(eval "echo \$LEASES4_AT${i}_HOSTNAME")
+            HW=$(eval "echo \$LEASES4_AT${i}_HWADDR")
+            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
             i=$((i + 1))
         done
         ;;
@@ -106,20 +108,20 @@ case "$1" in
         [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "remove" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4"
         ;;
     leases6_committed)
-        i=0; SIZE="${LEASES6_SIZE:-0}"
-        while [ "$i" -lt "$SIZE" ]; do
-            ADDR=$(eval "echo \$LEASES6_AT${i}_ADDRESS")
-            HN=$(eval "echo \$LEASES6_AT${i}_HOSTNAME")
-            DUID=$(eval "echo \$LEASES6_AT${i}_DUID")
-            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
-            i=$((i + 1))
-        done
         i=0; SIZE="${DELETED_LEASES6_SIZE:-0}"
         while [ "$i" -lt "$SIZE" ]; do
             ADDR=$(eval "echo \$DELETED_LEASES6_AT${i}_ADDRESS")
             HN=$(eval "echo \$DELETED_LEASES6_AT${i}_HOSTNAME")
             DUID=$(eval "echo \$DELETED_LEASES6_AT${i}_DUID")
             update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
+            i=$((i + 1))
+        done
+        i=0; SIZE="${LEASES6_SIZE:-0}"
+        while [ "$i" -lt "$SIZE" ]; do
+            ADDR=$(eval "echo \$LEASES6_AT${i}_ADDRESS")
+            HN=$(eval "echo \$LEASES6_AT${i}_HOSTNAME")
+            DUID=$(eval "echo \$LEASES6_AT${i}_DUID")
+            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
             i=$((i + 1))
         done
         ;;
