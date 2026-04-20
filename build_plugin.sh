@@ -33,6 +33,13 @@ if [ -z "$_KEA_UNBOUND_LOCKED" ]; then
     exec lockf -k -t 10 /tmp/kea-unbound.lock "$0" "$@"
 fi
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG_FILE"; }
+uc() {
+    local OUT RC
+    OUT=$(unbound-control -c "$UNBOUND_CONF" "$@" 2>&1)
+    RC=$?
+    [ $RC -ne 0 ] && log error "unbound-control $* failed (rc=$RC): $OUT"
+    return $RC
+}
 normalize_hostname() { echo "$1" | tr 'A-Z' 'a-z' | sed 's/\..*//' | sed 's/[^a-z0-9-]//g'; }
 get_domain() { D=$(hostname -d 2>/dev/null); [ -z "$D" ] && echo "home.arpa" || echo "$D"; }
 reverse_ipv4() { echo "$1" | awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}'; }
@@ -55,30 +62,74 @@ update_dns_entry() {
     [ "$IP_VER" = "6" ] && THIS_TYPE="AAAA" && OTHER_TYPE="A" && OTHER_VER="4"
     local PRESERVED_IP=$(drill -Q -t $OTHER_TYPE "$FQDN" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | awk '{print $NF}' | head -n 1)
     local PTR_NAME=$(get_ptr_name "$IP_VER" "$IP")
-    unbound-control -c "$UNBOUND_CONF" local_data_remove "$FQDN" >/dev/null 2>&1
-    [ -n "$PTR_NAME" ] && unbound-control -c "$UNBOUND_CONF" local_data_remove "$PTR_NAME" >/dev/null 2>&1
+    uc local_data_remove "$FQDN"
+    [ -n "$PTR_NAME" ] && uc local_data_remove "$PTR_NAME"
     if [ "$ACTION" = "add" ]; then
-        unbound-control -c "$UNBOUND_CONF" local_data "$FQDN IN $THIS_TYPE $IP" >/dev/null 2>&1
-        [ -n "$PTR_NAME" ] && unbound-control -c "$UNBOUND_CONF" local_data "$PTR_NAME PTR $FQDN" >/dev/null 2>&1
+        uc local_data "$FQDN IN $THIS_TYPE $IP"
+        [ -n "$PTR_NAME" ] && uc local_data "$PTR_NAME PTR $FQDN"
         log info "Added $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
     else
         log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
     fi
     if [ -n "$PRESERVED_IP" ]; then
         local PRES_PTR=$(get_ptr_name "$OTHER_VER" "$PRESERVED_IP")
-        unbound-control -c "$UNBOUND_CONF" local_data "$FQDN IN $OTHER_TYPE $PRESERVED_IP" >/dev/null 2>&1
-        [ -n "$PRES_PTR" ] && unbound-control -c "$UNBOUND_CONF" local_data "$PRES_PTR PTR $FQDN" >/dev/null 2>&1
+        uc local_data "$FQDN IN $OTHER_TYPE $PRESERVED_IP"
+        [ -n "$PRES_PTR" ] && uc local_data "$PRES_PTR PTR $FQDN"
     fi
 }
-if [ -n "$LEASE4_ADDRESS" ]; then
-    HOST="$LEASE4_HOSTNAME"; [ -z "$HOST" ] && HOST="device-$(echo "$LEASE4_HWADDR" | tr ':' '-')"
-    case "$1" in leases4_committed|lease4_renew) update_dns_entry "add" "$LEASE4_ADDRESS" "$HOST" "4" ;;
-    lease4_release|lease4_expire|lease4_decline) update_dns_entry "remove" "$LEASE4_ADDRESS" "$HOST" "4" ;; esac
-elif [ -n "$LEASE6_ADDRESS" ]; then
-    HOST="$LEASE6_HOSTNAME"; [ -z "$HOST" ] && HOST="device-$(echo "$LEASE6_DUID" | tr ':' '-')"
-    case "$1" in leases6_committed|lease6_renew) update_dns_entry "add" "$LEASE6_ADDRESS" "$HOST" "6" ;;
-    lease6_release|lease6_expire|lease6_decline) update_dns_entry "remove" "$LEASE6_ADDRESS" "$HOST" "6" ;; esac
-fi
+# leases4_committed / leases6_committed pass indexed env vars (LEASES4_AT<i>_*);
+# single-lease callouts (renew/release/expire/decline, v6 rebind) pass singular LEASE4_*/LEASE6_*.
+host_or_mac_fallback() { if [ -n "$1" ]; then echo "$1"; else echo "device-$(echo "$2" | tr ':' '-')"; fi; }
+case "$1" in
+    leases4_committed)
+        i=0; SIZE="${LEASES4_SIZE:-0}"
+        while [ "$i" -lt "$SIZE" ]; do
+            ADDR=$(eval "echo \$LEASES4_AT${i}_ADDRESS")
+            HN=$(eval "echo \$LEASES4_AT${i}_HOSTNAME")
+            HW=$(eval "echo \$LEASES4_AT${i}_HWADDR")
+            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
+            i=$((i + 1))
+        done
+        i=0; SIZE="${DELETED_LEASES4_SIZE:-0}"
+        while [ "$i" -lt "$SIZE" ]; do
+            ADDR=$(eval "echo \$DELETED_LEASES4_AT${i}_ADDRESS")
+            HN=$(eval "echo \$DELETED_LEASES4_AT${i}_HOSTNAME")
+            HW=$(eval "echo \$DELETED_LEASES4_AT${i}_HWADDR")
+            update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
+            i=$((i + 1))
+        done
+        ;;
+    lease4_renew)
+        [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "add" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4"
+        ;;
+    lease4_release|lease4_expire|lease4_decline)
+        [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "remove" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4"
+        ;;
+    leases6_committed)
+        i=0; SIZE="${LEASES6_SIZE:-0}"
+        while [ "$i" -lt "$SIZE" ]; do
+            ADDR=$(eval "echo \$LEASES6_AT${i}_ADDRESS")
+            HN=$(eval "echo \$LEASES6_AT${i}_HOSTNAME")
+            DUID=$(eval "echo \$LEASES6_AT${i}_DUID")
+            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
+            i=$((i + 1))
+        done
+        i=0; SIZE="${DELETED_LEASES6_SIZE:-0}"
+        while [ "$i" -lt "$SIZE" ]; do
+            ADDR=$(eval "echo \$DELETED_LEASES6_AT${i}_ADDRESS")
+            HN=$(eval "echo \$DELETED_LEASES6_AT${i}_HOSTNAME")
+            DUID=$(eval "echo \$DELETED_LEASES6_AT${i}_DUID")
+            update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
+            i=$((i + 1))
+        done
+        ;;
+    lease6_renew|lease6_rebind)
+        [ -n "$LEASE6_ADDRESS" ] && update_dns_entry "add" "$LEASE6_ADDRESS" "$(host_or_mac_fallback "$LEASE6_HOSTNAME" "$LEASE6_DUID")" "6"
+        ;;
+    lease6_release|lease6_expire|lease6_decline)
+        [ -n "$LEASE6_ADDRESS" ] && update_dns_entry "remove" "$LEASE6_ADDRESS" "$(host_or_mac_fallback "$LEASE6_HOSTNAME" "$LEASE6_DUID")" "6"
+        ;;
+esac
 EOF
 chmod 755 "${KEA_SCRIPT_DIR}/kea-unbound-hook.sh"
 
