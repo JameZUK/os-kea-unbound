@@ -1,8 +1,9 @@
 #!/bin/sh
 
 # ==============================================================================
-# Kea-Unbound Hook: Comprehensive Regression Test Suite (v3)
-# Covers every Kea run_script callout plus real-world edge cases.
+# Kea-Unbound Hook: Comprehensive Regression Test Suite (v4)
+# Covers every Kea run_script callout, static-reservation guard (issue #6),
+# and per-subnet/per-reservation domain lookup (issue #7).
 # ==============================================================================
 
 # --- CONFIGURATION ---
@@ -574,5 +575,181 @@ assert_missing "A" "$IP4"
 assert_ptr_missing "$IP4"
 
 # ==============================================================================
-printf "\n${GREEN}>>> ALL 20 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
+# Issue #6: static-reservation guard
+# Issue #7: per-subnet / per-reservation domain
+# ==============================================================================
+
+# Fixture paths used by the new tests. The hook reads these from env vars
+# (defaults to /var/unbound/host_entries.conf and the real Kea configs).
+TEST_HOST_ENTRIES="/tmp/test-kea-unbound-host_entries.conf"
+TEST_KEA4="/tmp/test-kea-unbound-dhcp4.conf"
+TEST_KEA6="/tmp/test-kea-unbound-dhcp6.conf"
+
+cleanup_fixtures() {
+    rm -f "$TEST_HOST_ENTRIES" "$TEST_KEA4" "$TEST_KEA6"
+    unset HOST_ENTRIES KEA_DHCP4_CONF KEA_DHCP6_CONF
+}
+trap cleanup_fixtures EXIT INT TERM
+
+# --- TEST 21 ---
+printf "\n${YELLOW}TEST 21: Issue #6 — static reservation in host_entries.conf is preserved${NC}\n"
+printf "${YELLOW}        Validates that hook skips BOTH add and remove for static FQDNs${NC}\n"
 clean_slate
+HOST="test-stress"
+FQDN="$HOST.$DOMAIN"
+# Simulate Unbound having loaded host_entries.conf at startup.
+unbound-control -c /var/unbound/unbound.conf local_data "$FQDN IN A $IP4" >/dev/null 2>&1
+unbound-control -c /var/unbound/unbound.conf local_data "$IP4_PTR PTR $FQDN" >/dev/null 2>&1
+# Sentinel matching the typical OPNsense Register-DHCP-Static-Mappings format.
+cat > "$TEST_HOST_ENTRIES" <<HE
+local-data: "$FQDN. 3600 IN A $IP4"
+local-data-ptr: "$IP4 $FQDN"
+HE
+export HOST_ENTRIES="$TEST_HOST_ENTRIES"
+
+# Lease release MUST NOT wipe the static A/PTR.
+trigger_v4 "lease4_release"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+
+# Lease commit (re-add) MUST also be a no-op — the static is authoritative.
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+
+# Cleanup
+unset HOST_ENTRIES
+rm -f "$TEST_HOST_ENTRIES"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
+
+# --- TEST 22 ---
+printf "\n${YELLOW}TEST 22: Issue #7 — per-reservation domain (matched by IP)${NC}\n"
+RES_DOMAIN_IP="cam.example.lan"
+RES_FQDN="$HOST.$RES_DOMAIN_IP"
+RES_FQDN_PTR_TARGET="$RES_FQDN"
+cat > "$TEST_KEA4" <<KEA
+{
+  "Dhcp4": {
+    "subnet4": [{
+      "subnet": "192.0.2.0/24",
+      "reservations": [{
+        "ip-address": "$IP4",
+        "hw-address": "$MAC",
+        "option-data": [{"name": "domain-name", "data": "$RES_DOMAIN_IP"}]
+      }]
+    }]
+  }
+}
+KEA
+export KEA_DHCP4_CONF="$TEST_KEA4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$RES_FQDN" >/dev/null 2>&1
+clean_slate
+FQDN="$RES_FQDN"
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$RES_FQDN_PTR_TARGET"
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+unset KEA_DHCP4_CONF
+rm -f "$TEST_KEA4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$RES_FQDN" >/dev/null 2>&1
+
+# --- TEST 23 ---
+printf "\n${YELLOW}TEST 23: Issue #7 — per-reservation domain (matched by hw-address, no IP pin)${NC}\n"
+HW_DOMAIN="hwmatch.example.lan"
+HW_FQDN="$HOST.$HW_DOMAIN"
+# Reservation has NO ip-address; IP is also outside the subnet, so subnet
+# CIDR match must NOT trigger. Only the hw-address match should fire.
+cat > "$TEST_KEA4" <<KEA
+{
+  "Dhcp4": {
+    "subnet4": [{
+      "subnet": "10.99.99.0/24",
+      "reservations": [{
+        "hw-address": "$MAC",
+        "option-data": [{"name": "domain-name", "data": "$HW_DOMAIN"}]
+      }]
+    }]
+  }
+}
+KEA
+export KEA_DHCP4_CONF="$TEST_KEA4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$HW_FQDN" >/dev/null 2>&1
+clean_slate
+FQDN="$HW_FQDN"
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$HW_FQDN"
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+unset KEA_DHCP4_CONF
+rm -f "$TEST_KEA4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$HW_FQDN" >/dev/null 2>&1
+
+# --- TEST 24 ---
+printf "\n${YELLOW}TEST 24: Issue #7 — per-subnet domain (CIDR match, no reservation)${NC}\n"
+SUB_DOMAIN="subnet.example.lan"
+SUB_FQDN="$HOST.$SUB_DOMAIN"
+cat > "$TEST_KEA4" <<KEA
+{
+  "Dhcp4": {
+    "subnet4": [{
+      "subnet": "192.0.2.0/24",
+      "option-data": [{"name": "domain-name", "data": "$SUB_DOMAIN"}]
+    }]
+  }
+}
+KEA
+export KEA_DHCP4_CONF="$TEST_KEA4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$SUB_FQDN" >/dev/null 2>&1
+clean_slate
+FQDN="$SUB_FQDN"
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$SUB_FQDN"
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+unset KEA_DHCP4_CONF
+rm -f "$TEST_KEA4"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$SUB_FQDN" >/dev/null 2>&1
+
+# --- TEST 25 ---
+printf "\n${YELLOW}TEST 25: Issue #7 — IPv6 per-reservation domain (matched by ip-addresses + duid)${NC}\n"
+V6_DOMAIN="v6res.example.lan"
+V6_FQDN="$HOST.$V6_DOMAIN"
+cat > "$TEST_KEA6" <<KEA
+{
+  "Dhcp6": {
+    "subnet6": [{
+      "subnet": "2001:db8::/32",
+      "reservations": [{
+        "ip-addresses": ["$IP6"],
+        "duid": "$DUID",
+        "option-data": [{"name": "domain-name", "data": "$V6_DOMAIN"}]
+      }]
+    }]
+  }
+}
+KEA
+export KEA_DHCP6_CONF="$TEST_KEA6"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$V6_FQDN" >/dev/null 2>&1
+clean_slate
+FQDN="$V6_FQDN"
+trigger_v6 "leases6_committed"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$V6_FQDN"
+trigger_v6 "lease6_release"
+assert_missing "AAAA" "$IP6"
+unset KEA_DHCP6_CONF
+rm -f "$TEST_KEA6"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$V6_FQDN" >/dev/null 2>&1
+
+# Restore globals
+HOST="test-stress"
+FQDN="$HOST.$DOMAIN"
+
+# ==============================================================================
+printf "\n${GREEN}>>> ALL 25 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
+clean_slate
+cleanup_fixtures

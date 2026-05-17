@@ -27,6 +27,10 @@ cat << 'EOF' > "${KEA_SCRIPT_DIR}/kea-unbound-hook.sh"
 #!/bin/sh
 LOG_FILE="/var/log/kea-unbound.log"
 UNBOUND_CONF="/var/unbound/unbound.conf"
+# Paths are env-overridable so the regression test suite can point them at fixtures.
+HOST_ENTRIES="${HOST_ENTRIES:-/var/unbound/host_entries.conf}"
+KEA_DHCP4_CONF="${KEA_DHCP4_CONF:-/usr/local/etc/kea/kea-dhcp4.conf}"
+KEA_DHCP6_CONF="${KEA_DHCP6_CONF:-/usr/local/etc/kea/kea-dhcp6.conf}"
 # Serialize concurrent executions to prevent dual-stack race conditions
 if [ -z "$_KEA_UNBOUND_LOCKED" ]; then
     export _KEA_UNBOUND_LOCKED=1
@@ -41,7 +45,74 @@ uc() {
     return $RC
 }
 normalize_hostname() { echo "$1" | tr 'A-Z' 'a-z' | sed 's/\..*//' | sed 's/[^a-z0-9-]//g'; }
-get_domain() { D=$(hostname -d 2>/dev/null); [ -z "$D" ] && echo "home.arpa" || echo "$D"; }
+# Issue #7: per-subnet/per-reservation domain lookup against Kea config.
+# Fall through to hostname -d / home.arpa if no match.
+# Args: IP, IP_VER (4|6), IDENT (hw-address for v4, duid for v6; may be empty).
+get_domain() {
+    local IP="$1" VER="$2" IDENT="$3" D CONF
+    if [ "$VER" = "6" ]; then CONF="$KEA_DHCP6_CONF"; else CONF="$KEA_DHCP4_CONF"; fi
+    if [ -f "$CONF" ]; then
+        D=$(/usr/local/bin/python3 - "$IP" "$VER" "$IDENT" "$CONF" <<'PYEOF' 2>/dev/null
+import json, sys, ipaddress, os
+ip, ver, ident, conf = sys.argv[1], sys.argv[2], sys.argv[3].lower(), sys.argv[4]
+try:
+    cfg = json.load(open(conf))
+except Exception:
+    sys.exit(1)
+root = cfg.get("Dhcp4") or cfg.get("Dhcp6") or {}
+subkey = "subnet4" if ver == "4" else "subnet6"
+subs = [s for n in root.get("shared-networks", []) or [] for s in n.get(subkey, []) or []]
+subs += root.get(subkey, []) or []
+def domain_of(node):
+    for o in node.get("option-data", []) or []:
+        if o.get("name") == "domain-name" and o.get("data"):
+            return o["data"]
+    return None
+# 1) reservations (most specific). Match by IP or by hw-address/DUID.
+for s in subs:
+    for r in s.get("reservations", []) or []:
+        ips = []
+        if ver == "4":
+            if r.get("ip-address"): ips.append(r["ip-address"])
+        else:
+            ips += list(r.get("ip-addresses") or [])
+            if r.get("ip-address"): ips.append(r["ip-address"])
+        matched = ip in ips
+        if not matched and ident:
+            hw = (r.get("hw-address") or "").lower()
+            duid = (r.get("duid") or "").lower()
+            if ident == hw or ident == duid:
+                matched = True
+        if matched:
+            d = domain_of(r)
+            if d:
+                print(d); sys.exit(0)
+# 2) subnet CIDR match.
+try:
+    target = ipaddress.ip_address(ip)
+except ValueError:
+    sys.exit(1)
+for s in subs:
+    net = s.get("subnet")
+    if not net: continue
+    try:
+        if target in ipaddress.ip_network(net, strict=False):
+            d = domain_of(s)
+            if d:
+                print(d); sys.exit(0)
+    except ValueError:
+        continue
+sys.exit(1)
+PYEOF
+)
+    fi
+    if [ -n "$D" ]; then
+        echo "$D"
+        return
+    fi
+    D=$(hostname -d 2>/dev/null)
+    [ -z "$D" ] && echo "home.arpa" || echo "$D"
+}
 reverse_ipv4() { echo "$1" | awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}'; }
 reverse_ipv6() {
     local result
@@ -53,13 +124,30 @@ reverse_ipv6() {
     echo "$result"
 }
 get_ptr_name() { [ "$1" = "4" ] && reverse_ipv4 "$2" || reverse_ipv6 "$2"; }
+# Issue #6: short-circuit on records owned by Unbound's host_entries.conf
+# (Register DHCP Static Mappings). Skip both add and remove — skipping only
+# remove still leaves a brief NXDOMAIN window on the add path.
+is_static_forward() {
+    local FQDN="$1" TYPE="$2"
+    [ -f "$HOST_ENTRIES" ] || return 1
+    grep -Eq "^local-data:[[:space:]]+\"${FQDN}\.?[[:space:]]+([0-9]+[[:space:]]+)?IN[[:space:]]+${TYPE}[[:space:]]" "$HOST_ENTRIES"
+}
+is_static_ptr() {
+    local IP="$1"
+    [ -f "$HOST_ENTRIES" ] || return 1
+    grep -Eq "^local-data-ptr:[[:space:]]+\"${IP}[[:space:]]" "$HOST_ENTRIES"
+}
 update_dns_entry() {
-    local ACTION="$1" IP="$2" HOST="$3" IP_VER="$4"
+    local ACTION="$1" IP="$2" HOST="$3" IP_VER="$4" IDENT="$5"
     [ -z "$IP" ] && return
     HOST=$(normalize_hostname "$HOST"); [ -z "$HOST" ] && return
-    local FQDN="$HOST.$(get_domain)"
+    local FQDN="$HOST.$(get_domain "$IP" "$IP_VER" "$IDENT")"
     local THIS_TYPE="A"; local OTHER_TYPE="AAAA"; local OTHER_VER="6"
     [ "$IP_VER" = "6" ] && THIS_TYPE="AAAA" && OTHER_TYPE="A" && OTHER_VER="4"
+    if is_static_forward "$FQDN" "$THIS_TYPE" || is_static_ptr "$IP"; then
+        log info "Skipped $ACTION for $FQDN ($IP) — static reservation"
+        return
+    fi
     local PRESERVED_IP=$(drill -Q -t $OTHER_TYPE "$FQDN" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | awk '{print $NF}' | head -n 1)
     local PTR_NAME=$(get_ptr_name "$IP_VER" "$IP")
     uc local_data_remove "$FQDN"
@@ -71,7 +159,8 @@ update_dns_entry() {
     else
         log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
     fi
-    if [ -n "$PRESERVED_IP" ]; then
+    # Re-add the other-family record drill saw, unless that record is also static.
+    if [ -n "$PRESERVED_IP" ] && ! is_static_forward "$FQDN" "$OTHER_TYPE"; then
         local PRES_PTR=$(get_ptr_name "$OTHER_VER" "$PRESERVED_IP")
         uc local_data "$FQDN IN $OTHER_TYPE $PRESERVED_IP"
         [ -n "$PRES_PTR" ] && uc local_data "$PRES_PTR PTR $FQDN"
@@ -89,7 +178,7 @@ case "$1" in
             ADDR=$(eval "echo \$DELETED_LEASES4_AT${i}_ADDRESS")
             HN=$(eval "echo \$DELETED_LEASES4_AT${i}_HOSTNAME")
             HW=$(eval "echo \$DELETED_LEASES4_AT${i}_HWADDR")
-            update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
+            update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4" "$HW"
             i=$((i + 1))
         done
         i=0; SIZE="${LEASES4_SIZE:-0}"
@@ -97,15 +186,15 @@ case "$1" in
             ADDR=$(eval "echo \$LEASES4_AT${i}_ADDRESS")
             HN=$(eval "echo \$LEASES4_AT${i}_HOSTNAME")
             HW=$(eval "echo \$LEASES4_AT${i}_HWADDR")
-            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4"
+            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$HW")" "4" "$HW"
             i=$((i + 1))
         done
         ;;
     lease4_renew)
-        [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "add" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4"
+        [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "add" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4" "$LEASE4_HWADDR"
         ;;
     lease4_release|lease4_expire|lease4_decline)
-        [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "remove" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4"
+        [ -n "$LEASE4_ADDRESS" ] && update_dns_entry "remove" "$LEASE4_ADDRESS" "$(host_or_mac_fallback "$LEASE4_HOSTNAME" "$LEASE4_HWADDR")" "4" "$LEASE4_HWADDR"
         ;;
     leases6_committed)
         i=0; SIZE="${DELETED_LEASES6_SIZE:-0}"
@@ -113,7 +202,7 @@ case "$1" in
             ADDR=$(eval "echo \$DELETED_LEASES6_AT${i}_ADDRESS")
             HN=$(eval "echo \$DELETED_LEASES6_AT${i}_HOSTNAME")
             DUID=$(eval "echo \$DELETED_LEASES6_AT${i}_DUID")
-            update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
+            update_dns_entry "remove" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6" "$DUID"
             i=$((i + 1))
         done
         i=0; SIZE="${LEASES6_SIZE:-0}"
@@ -121,15 +210,15 @@ case "$1" in
             ADDR=$(eval "echo \$LEASES6_AT${i}_ADDRESS")
             HN=$(eval "echo \$LEASES6_AT${i}_HOSTNAME")
             DUID=$(eval "echo \$LEASES6_AT${i}_DUID")
-            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6"
+            update_dns_entry "add" "$ADDR" "$(host_or_mac_fallback "$HN" "$DUID")" "6" "$DUID"
             i=$((i + 1))
         done
         ;;
     lease6_renew|lease6_rebind)
-        [ -n "$LEASE6_ADDRESS" ] && update_dns_entry "add" "$LEASE6_ADDRESS" "$(host_or_mac_fallback "$LEASE6_HOSTNAME" "$LEASE6_DUID")" "6"
+        [ -n "$LEASE6_ADDRESS" ] && update_dns_entry "add" "$LEASE6_ADDRESS" "$(host_or_mac_fallback "$LEASE6_HOSTNAME" "$LEASE6_DUID")" "6" "$LEASE6_DUID"
         ;;
     lease6_release|lease6_expire|lease6_decline)
-        [ -n "$LEASE6_ADDRESS" ] && update_dns_entry "remove" "$LEASE6_ADDRESS" "$(host_or_mac_fallback "$LEASE6_HOSTNAME" "$LEASE6_DUID")" "6"
+        [ -n "$LEASE6_ADDRESS" ] && update_dns_entry "remove" "$LEASE6_ADDRESS" "$(host_or_mac_fallback "$LEASE6_HOSTNAME" "$LEASE6_DUID")" "6" "$LEASE6_DUID"
         ;;
 esac
 EOF
