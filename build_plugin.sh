@@ -2,7 +2,7 @@
 
 # 1. Define Variables
 PLUGIN_NAME="os-kea-unbound"
-VERSION="3.6.0"
+VERSION="3.6.1"
 BUILD_DIR="./${PLUGIN_NAME}_build"
 STAGE_DIR="${BUILD_DIR}/stage"
 
@@ -159,8 +159,12 @@ update_dns_entry() {
     else
         log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
     fi
-    # Re-add the other-family record drill saw, unless that record is also static.
-    if [ -n "$PRESERVED_IP" ] && ! is_static_forward "$FQDN" "$OTHER_TYPE"; then
+    # Re-add the other-family record drill saw. local_data_remove above wipes
+    # ALL types for FQDN — including static records loaded from host_entries.conf,
+    # which Unbound only consults at startup. Restoring is idempotent for the
+    # static case and required for dual-stack hosts where one family is static
+    # and the other dynamic.
+    if [ -n "$PRESERVED_IP" ]; then
         local PRES_PTR=$(get_ptr_name "$OTHER_VER" "$PRESERVED_IP")
         uc local_data "$FQDN IN $OTHER_TYPE $PRESERVED_IP"
         [ -n "$PRES_PTR" ] && uc local_data "$PRES_PTR PTR $FQDN"

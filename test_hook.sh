@@ -1,9 +1,10 @@
 #!/bin/sh
 
 # ==============================================================================
-# Kea-Unbound Hook: Comprehensive Regression Test Suite (v4)
+# Kea-Unbound Hook: Comprehensive Regression Test Suite (v5)
 # Covers every Kea run_script callout, static-reservation guard (issue #6),
-# and per-subnet/per-reservation domain lookup (issue #7).
+# per-subnet/per-reservation domain lookup (issue #7), and static-A-survives-
+# dynamic-AAAA preservation.
 # ==============================================================================
 
 # --- CONFIGURATION ---
@@ -749,7 +750,41 @@ unbound-control -c /var/unbound/unbound.conf local_data_remove "$V6_FQDN" >/dev/
 HOST="test-stress"
 FQDN="$HOST.$DOMAIN"
 
+# --- TEST 26 ---
+printf "\n${YELLOW}TEST 26: Static A preserved across dynamic AAAA event${NC}\n"
+printf "${YELLOW}        Regression: local_data_remove during a v6 event must not${NC}\n"
+printf "${YELLOW}        permanently wipe a static A loaded from host_entries.conf${NC}\n"
+clean_slate
+# Simulate Unbound having loaded host_entries.conf at startup.
+unbound-control -c /var/unbound/unbound.conf local_data "$FQDN IN A $IP4" >/dev/null 2>&1
+unbound-control -c /var/unbound/unbound.conf local_data "$IP4_PTR PTR $FQDN" >/dev/null 2>&1
+cat > "$TEST_HOST_ENTRIES" <<HE
+local-data: "$FQDN. 3600 IN A $IP4"
+local-data-ptr: "$IP4 $FQDN"
+HE
+export HOST_ENTRIES="$TEST_HOST_ENTRIES"
+
+# Dynamic v6 lease arrives — AAAA must register AND static A must survive.
+trigger_v6 "leases6_committed"
+assert_exists "AAAA" "$IP6"
+assert_ptr_exists "$IP6" "$FQDN"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+
+# v6 release must also leave the static A intact.
+trigger_v6 "lease6_release"
+assert_missing "AAAA" "$IP6"
+assert_ptr_missing "$IP6"
+assert_exists "A" "$IP4"
+assert_ptr_exists "$IP4" "$FQDN"
+
+# Cleanup
+unset HOST_ENTRIES
+rm -f "$TEST_HOST_ENTRIES"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
+
 # ==============================================================================
-printf "\n${GREEN}>>> ALL 25 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
+printf "\n${GREEN}>>> ALL 26 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
 clean_slate
 cleanup_fixtures
