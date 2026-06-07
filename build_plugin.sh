@@ -2,7 +2,7 @@
 
 # 1. Define Variables
 PLUGIN_NAME="os-kea-unbound"
-VERSION="3.6.1"
+VERSION="3.7.0"
 BUILD_DIR="./${PLUGIN_NAME}_build"
 STAGE_DIR="${BUILD_DIR}/stage"
 
@@ -14,10 +14,11 @@ mkdir -p "${STAGE_DIR}"
 KEA_SCRIPT_DIR="${STAGE_DIR}/usr/local/share/kea/scripts"
 UPDATE_HOOK_DIR="${STAGE_DIR}/usr/local/etc/rc.syshook.d/update"
 BOOT_HOOK_DIR="${STAGE_DIR}/usr/local/etc/rc.syshook.d/early"
+START_HOOK_DIR="${STAGE_DIR}/usr/local/etc/rc.syshook.d/start"
 LOG_ROT_DIR="${STAGE_DIR}/usr/local/etc/newsyslog.conf.d"
 
 echo ">>> Creating directory structure..."
-mkdir -p "${KEA_SCRIPT_DIR}" "${UPDATE_HOOK_DIR}" "${BOOT_HOOK_DIR}" "${LOG_ROT_DIR}"
+mkdir -p "${KEA_SCRIPT_DIR}" "${UPDATE_HOOK_DIR}" "${BOOT_HOOK_DIR}" "${START_HOOK_DIR}" "${LOG_ROT_DIR}"
 mkdir -p "${STAGE_DIR}/usr/local/etc/inc/plugins.inc.d"
 
 echo ">>> Generating Plugin Files..."
@@ -25,9 +26,9 @@ echo ">>> Generating Plugin Files..."
 # --- 1. The DNS Hook Script ---
 cat << 'EOF' > "${KEA_SCRIPT_DIR}/kea-unbound-hook.sh"
 #!/bin/sh
-LOG_FILE="/var/log/kea-unbound.log"
-UNBOUND_CONF="/var/unbound/unbound.conf"
 # Paths are env-overridable so the regression test suite can point them at fixtures.
+LOG_FILE="${LOG_FILE:-/var/log/kea-unbound.log}"
+UNBOUND_CONF="${UNBOUND_CONF:-/var/unbound/unbound.conf}"
 HOST_ENTRIES="${HOST_ENTRIES:-/var/unbound/host_entries.conf}"
 KEA_DHCP4_CONF="${KEA_DHCP4_CONF:-/usr/local/etc/kea/kea-dhcp4.conf}"
 KEA_DHCP6_CONF="${KEA_DHCP6_CONF:-/usr/local/etc/kea/kea-dhcp6.conf}"
@@ -144,27 +145,45 @@ update_dns_entry() {
     local FQDN="$HOST.$(get_domain "$IP" "$IP_VER" "$IDENT")"
     local THIS_TYPE="A"; local OTHER_TYPE="AAAA"; local OTHER_VER="6"
     [ "$IP_VER" = "6" ] && THIS_TYPE="AAAA" && OTHER_TYPE="A" && OTHER_VER="4"
-    if is_static_forward "$FQDN" "$THIS_TYPE" || is_static_ptr "$IP"; then
-        log info "Skipped $ACTION for $FQDN ($IP) — static reservation"
+    # Issue #10: Kea fires both leases*_committed AND lease*_renew/rebind for
+    # the same renewal. Without this guard the same "Added" line is logged twice.
+    local CURRENT_IP=$(drill -Q -t $THIS_TYPE "$FQDN" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | awk '{print $NF}' | head -n 1)
+    [ "$ACTION" = "add" ] && [ "$CURRENT_IP" = "$IP" ] && return
+    # Issue #11: forward and PTR guards are independent. A static PTR for $IP
+    # must not suppress an unrelated forward record at $FQDN, and a static
+    # forward at $FQDN must not suppress an unrelated PTR.
+    local SKIP_FWD=0 SKIP_PTR=0
+    is_static_forward "$FQDN" "$THIS_TYPE" && SKIP_FWD=1
+    is_static_ptr "$IP" && SKIP_PTR=1
+    if [ "$SKIP_FWD" -eq 1 ] && [ "$SKIP_PTR" -eq 1 ]; then
+        log info "Skipped $ACTION for $FQDN ($IP) — static forward and PTR"
         return
     fi
     local PRESERVED_IP=$(drill -Q -t $OTHER_TYPE "$FQDN" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | awk '{print $NF}' | head -n 1)
     local PTR_NAME=$(get_ptr_name "$IP_VER" "$IP")
-    uc local_data_remove "$FQDN"
-    [ -n "$PTR_NAME" ] && uc local_data_remove "$PTR_NAME"
-    if [ "$ACTION" = "add" ]; then
-        uc local_data "$FQDN IN $THIS_TYPE $IP"
-        [ -n "$PTR_NAME" ] && uc local_data "$PTR_NAME PTR $FQDN"
-        log info "Added $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
-    else
-        log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]"
+    # Forward record (gated by SKIP_FWD)
+    if [ "$SKIP_FWD" -eq 0 ]; then
+        uc local_data_remove "$FQDN"
+        [ "$ACTION" = "add" ] && uc local_data "$FQDN IN $THIS_TYPE $IP"
     fi
-    # Re-add the other-family record drill saw. local_data_remove above wipes
+    # PTR record (independently gated by SKIP_PTR)
+    if [ "$SKIP_PTR" -eq 0 ] && [ -n "$PTR_NAME" ]; then
+        uc local_data_remove "$PTR_NAME"
+        [ "$ACTION" = "add" ] && uc local_data "$PTR_NAME PTR $FQDN"
+    fi
+    local NOTE=""
+    [ "$SKIP_FWD" -eq 1 ] && NOTE="$NOTE (forward static)"
+    [ "$SKIP_PTR" -eq 1 ] && NOTE="$NOTE (PTR static)"
+    if [ "$ACTION" = "add" ]; then
+        log info "Added $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]$NOTE"
+    else
+        log info "Removed $THIS_TYPE for $FQDN ($IP) [PTR: ${PTR_NAME:-FAILED}]$NOTE"
+    fi
+    # Restore the other-family record drill saw. local_data_remove above wipes
     # ALL types for FQDN — including static records loaded from host_entries.conf,
-    # which Unbound only consults at startup. Restoring is idempotent for the
-    # static case and required for dual-stack hosts where one family is static
-    # and the other dynamic.
-    if [ -n "$PRESERVED_IP" ]; then
+    # which Unbound only consults at startup. Only meaningful when we touched
+    # the forward record.
+    if [ -n "$PRESERVED_IP" ] && [ "$SKIP_FWD" -eq 0 ]; then
         local PRES_PTR=$(get_ptr_name "$OTHER_VER" "$PRESERVED_IP")
         uc local_data "$FQDN IN $OTHER_TYPE $PRESERVED_IP"
         [ -n "$PRES_PTR" ] && uc local_data "$PRES_PTR PTR $FQDN"
@@ -227,6 +246,127 @@ case "$1" in
 esac
 EOF
 chmod 755 "${KEA_SCRIPT_DIR}/kea-unbound-hook.sh"
+
+# --- 1b. Boot Replay (Issue #13) ---
+# After a reboot Unbound starts empty; the hook script only refills entries
+# as new lease events fire. This start-hook reads Kea's lease database and
+# replays active leases through the hook so dynamic DNS is restored without
+# waiting for each client to renew.
+cat << 'EOF' > "${START_HOOK_DIR}/50-keaunbound-replay"
+#!/bin/sh
+HOOK="/usr/local/share/kea/scripts/kea-unbound-hook.sh"
+LOG="/var/log/kea-unbound.log"
+LEASES4="/var/db/kea/kea-leases4.csv"
+LEASES6="/var/db/kea/kea-leases6.csv"
+UNBOUND_CONF="/var/unbound/unbound.conf"
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG"; }
+[ -x "$HOOK" ] || exit 0
+# Wait up to 90s for unbound-control to answer — Unbound takes a moment to
+# come up after boot, and we'd silently fail otherwise.
+i=0
+while [ $i -lt 90 ]; do
+    unbound-control -c "$UNBOUND_CONF" status >/dev/null 2>&1 && break
+    sleep 1
+    i=$((i + 1))
+done
+if [ $i -ge 90 ]; then
+    log error "Boot replay: unbound-control unreachable after 90s, skipping"
+    exit 0
+fi
+log info "Boot replay starting"
+# Parse the Kea memfile CSV, filter to active non-expired leases, and replay
+# each family through one synthetic leases*_committed event. Every CSV
+# column from the lease is mapped into the matching LEASES{4,6}_AT<i>_*
+# env var (per Kea run_script schema), so the synthetic event is
+# indistinguishable from one Kea would have fired: hostname, hardware
+# identifier, valid/preferred lifetimes, CLTT (derived from expire -
+# valid_lifetime), subnet id, FQDN forward/reverse flags, lease type,
+# IAID, prefix length, etc. are all preserved.
+COUNT=$(/usr/local/bin/python3 - "$LEASES4" "$LEASES6" "$HOOK" <<'PYEOF'
+import csv, os, subprocess, sys, time
+v4_path, v6_path, hook = sys.argv[1], sys.argv[2], sys.argv[3]
+now = int(time.time())
+# Map Kea memfile CSV column names to the env var suffix used by the
+# run_script hook library. Anything in the CSV that has no documented
+# env var is still exported under its uppercased column name so future
+# hook logic can reach it.
+V4_MAP = {
+    "address": "ADDRESS", "hwaddr": "HWADDR", "client_id": "CLIENT_ID",
+    "valid_lifetime": "VALID_LIFETIME", "subnet_id": "SUBNET_ID",
+    "fqdn_fwd": "FQDN_FWD", "fqdn_rev": "FQDN_REV",
+    "hostname": "HOSTNAME", "state": "STATE",
+    "user_context": "USER_CONTEXT", "pool_id": "POOL_ID",
+}
+V6_MAP = {
+    "address": "ADDRESS", "duid": "DUID",
+    "valid_lifetime": "VALID_LIFETIME", "subnet_id": "SUBNET_ID",
+    "pref_lifetime": "PREFERRED_LIFETIME", "lease_type": "TYPE",
+    "iaid": "IAID", "prefix_len": "PREFIX_LEN",
+    "fqdn_fwd": "FQDN_FWD", "fqdn_rev": "FQDN_REV",
+    "hostname": "HOSTNAME", "hwaddr": "HWADDR", "state": "STATE",
+    "user_context": "USER_CONTEXT", "hwtype": "HWTYPE",
+    "hwaddr_source": "HWADDR_SOURCE", "pool_id": "POOL_ID",
+}
+def replay(path, family):
+    if not os.path.exists(path):
+        return 0
+    seen = {}
+    try:
+        with open(path) as f:
+            for row in csv.DictReader(f):
+                try:
+                    if int(row.get("state", "0") or 0) != 0:
+                        continue
+                    exp = row.get("expire", "")
+                    if exp and int(exp) <= now:
+                        continue
+                    addr = (row.get("address") or "").strip()
+                    if not addr:
+                        continue
+                    # Memfile is append-only; keep only the newest row per address.
+                    seen[addr] = row
+                except (ValueError, KeyError):
+                    continue
+    except Exception:
+        return 0
+    if not seen:
+        return 0
+    env = dict(os.environ)
+    cmap = V4_MAP if family == "4" else V6_MAP
+    prefix = "LEASES4_AT" if family == "4" else "LEASES6_AT"
+    for i, (addr, row) in enumerate(seen.items()):
+        for col, value in row.items():
+            if value is None:
+                continue
+            value = value.strip() if isinstance(value, str) else str(value)
+            suffix = cmap.get(col, col.upper())
+            env[f"{prefix}{i}_{suffix}"] = value
+        # CLTT (Client Last Transmission Time) isn't a CSV column but Kea
+        # passes it to hooks. Reconstruct it from expire - valid_lifetime.
+        try:
+            cltt = int(row.get("expire", "0")) - int(row.get("valid_lifetime", "0"))
+            if cltt > 0:
+                env[f"{prefix}{i}_CLTT"] = str(cltt)
+        except (TypeError, ValueError):
+            pass
+        # Identifier env vars Kea exposes for v6 reservations matching.
+        if family == "6" and row.get("duid"):
+            env[f"{prefix}{i}_DUID"] = row["duid"].strip().lower()
+    if family == "4":
+        env["LEASES4_SIZE"] = str(len(seen))
+        callout = "leases4_committed"
+    else:
+        env["LEASES6_SIZE"] = str(len(seen))
+        callout = "leases6_committed"
+    subprocess.run([hook, callout], env=env, check=False)
+    return len(seen)
+total = replay(v4_path, "4") + replay(v6_path, "6")
+print(total)
+PYEOF
+)
+log info "Boot replay complete (${COUNT:-0} leases replayed)"
+EOF
+chmod 755 "${START_HOOK_DIR}/50-keaunbound-replay"
 
 # --- 2. The Python Patcher Logic ---
 PATCH_CMD='import os, shutil
@@ -295,13 +435,46 @@ EOF
 
 cat << 'EOF' > "${BUILD_DIR}/+PRE_DEINSTALL"
 #!/bin/sh
-restore() { [ -f "$1.bak" ] && mv "$1.bak" "$1"; }
-restore "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings4.xml"
-restore "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.xml"
-restore "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.php"
-restore "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings6.xml"
-restore "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.xml"
-restore "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.php"
+# Issue #9: do NOT restore the .bak files. They were captured at install
+# time; if OPNsense was upgraded since, restoring them would roll those
+# files back to an older shape and break the system. Instead, strip just
+# the blocks we injected (matched by signature), then discard the .bak.
+/usr/local/bin/python3 - <<'PYEOF'
+import os, re
+sets = [
+    {"ctrl": "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings4.xml",
+     "model": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.xml",
+     "php":   "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.php"},
+    {"ctrl": "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings6.xml",
+     "model": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.xml",
+     "php":   "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.php"},
+]
+ctrl_re  = re.compile(r"    <field>\s*<id>[^<]*registerDynamicLeases[^<]*</id>.*?</field>\s*\n", re.DOTALL)
+model_re = re.compile(r"\s*<registerDynamicLeases[^>]*>.*?</registerDynamicLeases>\s*\n", re.DOTALL)
+php_re   = re.compile(r"        if \(\(string\)\$this->general->registerDynamicLeases === \"1\"\) \{.*?\n        \}\n", re.DOTALL)
+def strip(path, pat):
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r") as f:
+            c = f.read()
+        c2 = pat.sub("", c, count=1)
+        if c2 != c:
+            with open(path, "w") as f:
+                f.write(c2)
+    except Exception:
+        pass
+for s in sets:
+    strip(s["ctrl"],  ctrl_re)
+    strip(s["model"], model_re)
+    strip(s["php"],   php_re)
+    for p in (s["ctrl"], s["model"], s["php"]):
+        bak = p + ".bak"
+        if os.path.exists(bak):
+            try: os.remove(bak)
+            except Exception: pass
+PYEOF
+rm -rf /var/cache/opnsense/volt/*
 /usr/sbin/service configd restart
 EOF
 chmod +x "${BUILD_DIR}/+POST_INSTALL" "${BUILD_DIR}/+PRE_DEINSTALL"
@@ -326,6 +499,7 @@ cat << EOF > "${BUILD_DIR}/plist"
 /usr/local/etc/inc/plugins.inc.d/keaunbound.inc
 /usr/local/etc/rc.syshook.d/update/50-keaunbound-repair
 /usr/local/etc/rc.syshook.d/early/50-keaunbound-repair
+/usr/local/etc/rc.syshook.d/start/50-keaunbound-replay
 /usr/local/etc/newsyslog.conf.d/keaunbound.conf
 EOF
 

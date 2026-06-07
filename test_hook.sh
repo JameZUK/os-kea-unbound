@@ -1,10 +1,11 @@
 #!/bin/sh
 
 # ==============================================================================
-# Kea-Unbound Hook: Comprehensive Regression Test Suite (v5)
+# Kea-Unbound Hook: Comprehensive Regression Test Suite (v6)
 # Covers every Kea run_script callout, static-reservation guard (issue #6),
-# per-subnet/per-reservation domain lookup (issue #7), and static-A-survives-
-# dynamic-AAAA preservation.
+# per-subnet/per-reservation domain lookup (issue #7), static-A-survives-
+# dynamic-AAAA preservation, independent forward/PTR guards (issue #11),
+# and add idempotency / duplicate-log suppression (issue #10).
 # ==============================================================================
 
 # --- CONFIGURATION ---
@@ -784,7 +785,113 @@ rm -f "$TEST_HOST_ENTRIES"
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
 unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
 
+# --- TEST 27 ---
+printf "\n${YELLOW}TEST 27: Issue #11 — static PTR alone does NOT block forward A${NC}\n"
+printf "${YELLOW}        Static PTR for an IP must not suppress an unrelated A record${NC}\n"
+clean_slate
+OTHER_HOST="static-owner.$DOMAIN"
+# Seed Unbound with a static PTR pointing at a totally unrelated FQDN.
+unbound-control -c /var/unbound/unbound.conf local_data "$IP4_PTR PTR $OTHER_HOST" >/dev/null 2>&1
+# host_entries fixture has ONLY a static PTR — no static forward for OUR FQDN.
+cat > "$TEST_HOST_ENTRIES" <<HE
+local-data-ptr: "$IP4 $OTHER_HOST"
+HE
+export HOST_ENTRIES="$TEST_HOST_ENTRIES"
+
+trigger_v4 "leases4_committed"
+# Our forward A MUST register (this is the fix).
+assert_exists "A" "$IP4"
+# Static PTR MUST survive — we never touched it.
+RES=$(drill -Q -x "$IP4" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | head -n 1)
+if echo "$RES" | grep -qi "$OTHER_HOST"; then
+    printf "${GREEN}[PASS]${NC} Static PTR preserved ($IP4 -> $OTHER_HOST)\n"
+else
+    printf "${RED}[FAIL]${NC} Static PTR for $IP4 was clobbered. Got: $RES\n"
+    exit 1
+fi
+
+# Release must remove the dynamic forward but again leave the static PTR alone.
+trigger_v4 "lease4_release"
+assert_missing "A" "$IP4"
+RES=$(drill -Q -x "$IP4" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | head -n 1)
+if echo "$RES" | grep -qi "$OTHER_HOST"; then
+    printf "${GREEN}[PASS]${NC} Static PTR preserved across release\n"
+else
+    printf "${RED}[FAIL]${NC} Static PTR for $IP4 lost on release. Got: $RES\n"
+    exit 1
+fi
+unset HOST_ENTRIES
+rm -f "$TEST_HOST_ENTRIES"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$IP4_PTR" >/dev/null 2>&1
+
+# --- TEST 28 ---
+printf "\n${YELLOW}TEST 28: Issue #11 — static forward alone does NOT block PTR${NC}\n"
+printf "${YELLOW}        Static A for FQDN must not suppress dynamic PTR registration${NC}\n"
+clean_slate
+OTHER_IP="192.0.2.222"
+# Seed Unbound with a static forward record pointing somewhere else.
+unbound-control -c /var/unbound/unbound.conf local_data "$FQDN IN A $OTHER_IP" >/dev/null 2>&1
+# host_entries fixture has ONLY the static forward — no static PTR for OUR IP.
+cat > "$TEST_HOST_ENTRIES" <<HE
+local-data: "$FQDN. 3600 IN A $OTHER_IP"
+HE
+export HOST_ENTRIES="$TEST_HOST_ENTRIES"
+
+trigger_v4 "leases4_committed"
+# Static forward MUST survive — we never touched it.
+RES=$(drill -Q -t A "$FQDN" @127.0.0.1 2>/dev/null | grep -v "^;" | grep -v "^$" | head -n 1)
+if echo "$RES" | grep -q "$OTHER_IP"; then
+    printf "${GREEN}[PASS]${NC} Static A preserved ($FQDN -> $OTHER_IP)\n"
+else
+    printf "${RED}[FAIL]${NC} Static A for $FQDN was clobbered. Got: $RES\n"
+    exit 1
+fi
+# PTR for OUR IP MUST register (this is the fix).
+assert_ptr_exists "$IP4" "$FQDN"
+
+# Cleanup
+trigger_v4 "lease4_release"
+assert_ptr_missing "$IP4"
+unset HOST_ENTRIES
+rm -f "$TEST_HOST_ENTRIES"
+unbound-control -c /var/unbound/unbound.conf local_data_remove "$FQDN" >/dev/null 2>&1
+
+# --- TEST 29 ---
+printf "\n${YELLOW}TEST 29: Issue #10 — repeat add is idempotent (no duplicate log)${NC}\n"
+printf "${YELLOW}        leases*_committed + lease*_renew firing for same lease must${NC}\n"
+printf "${YELLOW}        log only one 'Added' line, not two${NC}\n"
+clean_slate
+TEST_LOG="/tmp/test-kea-unbound.log"
+: > "$TEST_LOG"
+export LOG_FILE="$TEST_LOG"
+
+trigger_v4 "leases4_committed"
+assert_exists "A" "$IP4"
+ADD_LINES_1=$(grep -c "Added A for $FQDN" "$TEST_LOG")
+
+# Simulate the duplicate-fire: lease4_renew immediately after the commit.
+trigger_v4 "lease4_renew"
+ADD_LINES_2=$(grep -c "Added A for $FQDN" "$TEST_LOG")
+
+# A second leases4_committed for the same lease (e.g. lease cache refresh).
+trigger_v4 "leases4_committed"
+ADD_LINES_3=$(grep -c "Added A for $FQDN" "$TEST_LOG")
+
+if [ "$ADD_LINES_1" = "1" ] && [ "$ADD_LINES_2" = "1" ] && [ "$ADD_LINES_3" = "1" ]; then
+    printf "${GREEN}[PASS]${NC} Idempotent: 1 add line after 3 add events\n"
+else
+    printf "${RED}[FAIL]${NC} Duplicate logs: after1=$ADD_LINES_1 after2=$ADD_LINES_2 after3=$ADD_LINES_3\n"
+    echo "--- log contents ---"
+    cat "$TEST_LOG"
+    exit 1
+fi
+
+# Cleanup
+trigger_v4 "lease4_release"
+unset LOG_FILE
+rm -f "$TEST_LOG"
+
 # ==============================================================================
-printf "\n${GREEN}>>> ALL 26 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
+printf "\n${GREEN}>>> ALL 29 TEST CASES PASSED SUCCESSFULLY! <<<${NC}\n"
 clean_slate
 cleanup_fixtures
