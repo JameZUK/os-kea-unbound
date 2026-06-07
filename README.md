@@ -42,7 +42,7 @@ You can install the pre-compiled package directly via the OPNsense shell (SSH).
 
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v3.8.0/os-kea-unbound-3.8.0.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v3.8.1/os-kea-unbound-3.8.1.pkg
 ```
 
 *Note: You may see a "misconfigured" warning next to the plugin in the OPNsense web interface. This is cosmetic and expected when installing packages manually outside of a signed repository.*
@@ -57,7 +57,7 @@ If you prefer to build the package yourself:
 ```sh
 chmod +x build_plugin.sh
 ./build_plugin.sh
-pkg add ./os-kea-unbound-3.8.0.pkg
+pkg add ./os-kea-unbound-3.8.1.pkg
 ```
 
 ## Configuration
@@ -95,7 +95,7 @@ To prevent configuration conflicts or service crashes during an upgrade, follow 
     * Log in via SSH and run:
     ```sh
     pkg delete os-kea-unbound
-    pkg add ./os-kea-unbound-3.8.0.pkg
+    pkg add ./os-kea-unbound-3.8.1.pkg
     ```
 
 3.  **Re-Enable Hooks:**

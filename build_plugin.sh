@@ -2,7 +2,7 @@
 
 # 1. Define Variables
 PLUGIN_NAME="os-kea-unbound"
-VERSION="3.8.0"
+VERSION="3.8.1"
 BUILD_DIR="./${PLUGIN_NAME}_build"
 STAGE_DIR="${BUILD_DIR}/stage"
 
@@ -530,6 +530,75 @@ if problems:
 else:
     print("kea-unbound: UI patch OK")'
 
+# --- 2b. Generated-config restore (reinstall safety) ---
+# There is no "configctl kea reload" action that regenerates the Kea JSON from
+# config.xml (only start/stop/restart/status exist, and restart reloads the
+# *existing* file). After a clean uninstall the generated kea-dhcp{4,6}.conf no
+# longer contains our hook, so a reinstall would leave registration off until
+# the operator re-applies settings. This re-injects the hook into the generated
+# config IFF registerDynamicLeases is enabled for that family in config.xml —
+# the exact inverse of the PRE_DEINSTALL scrub. It prints "changed" when it
+# edits anything so POST_INSTALL knows to restart Kea.
+# NOTE: keep free of single quotes and $ — embedded in a single-quoted string
+# that is itself expanded inside an unquoted here-doc.
+RESTORE_CMD='import os, json, tempfile, xml.etree.ElementTree as ET
+CONFIG = "/conf/config.xml"
+HOOK = "/usr/local/share/kea/scripts/kea-unbound-hook.sh"
+LIB = "/usr/local/lib/kea/hooks/libdhcp_run_script.so"
+fams = [("/usr/local/etc/kea/kea-dhcp4.conf", "Dhcp4", "dhcp4"),
+        ("/usr/local/etc/kea/kea-dhcp6.conf", "Dhcp6", "dhcp6")]
+def enabled(fam):
+    try:
+        root = ET.parse(CONFIG).getroot()
+    except Exception:
+        return False
+    for kea in root.iter("Kea"):
+        for f in kea.findall(fam):
+            for g in f.findall("general"):
+                for r in g.findall("registerDynamicLeases"):
+                    if (r.text or "").strip() == "1":
+                        return True
+    return False
+def write_atomic(path, data):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d)
+    try:
+        with os.fdopen(fd, "w") as fh: fh.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except Exception: pass
+        raise
+changed = False
+for conf, rootkey, fam in fams:
+    if not os.path.exists(conf) or not enabled(fam):
+        continue
+    try:
+        with open(conf) as f: cfg = json.load(f)
+    except Exception:
+        continue
+    node = cfg.get(rootkey)
+    if not isinstance(node, dict):
+        continue
+    hooks = node.get("hooks-libraries")
+    if not isinstance(hooks, list):
+        hooks = []
+    present = False
+    for h in hooks:
+        if isinstance(h, dict) and isinstance(h.get("parameters"), dict) and HOOK in str(h["parameters"].get("name", "")):
+            present = True
+            break
+    if present:
+        continue
+    hooks.append({"library": LIB, "parameters": {"name": HOOK, "sync": False}})
+    node["hooks-libraries"] = hooks
+    try:
+        write_atomic(conf, json.dumps(cfg, indent=2))
+        changed = True
+    except Exception:
+        pass
+print("changed" if changed else "nochange")'
+
 # --- 3. Persistence Hooks & Log Rotation ---
 HOOK_CONTENT="#!/bin/sh
 # Kea-Unbound repair hook
@@ -567,7 +636,17 @@ else
 fi
 rm -rf /var/cache/opnsense/volt/* 2>/dev/null
 /usr/sbin/service configd restart >/dev/null 2>&1 || true
-echo "Plugin installed. Please go to Services > Kea DHCP > Settings."
+# Reinstall safety: if registration is still enabled in config.xml, re-inject
+# our hook into the generated Kea config (a prior uninstall scrubbed it) and
+# restart Kea so live registration resumes without a manual settings apply.
+if [ -x /usr/local/bin/python3 ]; then
+    RESTORE_OUT=\$(/usr/local/bin/python3 -c '$RESTORE_CMD' 2>/dev/null)
+    if [ "\$RESTORE_OUT" = "changed" ] && [ -x /usr/local/sbin/configctl ]; then
+        /usr/local/sbin/configctl kea restart >/dev/null 2>&1 || true
+        echo "kea-unbound: restored hook to running Kea config."
+    fi
+fi
+echo "Plugin installed. If this is a first install, enable it under Services > Kea DHCP > Settings."
 EOF
 
 cat << 'EOF' > "${BUILD_DIR}/+PRE_DEINSTALL"
@@ -665,8 +744,10 @@ for conf, root in (("/usr/local/etc/kea/kea-dhcp4.conf", "Dhcp4"),
 PYEOF
 
 # --- Step 3: best-effort make the change live (guarded; never abort) ---
+# Kea has no "reload" configd action — restart reloads the now-scrubbed config
+# so the running daemon stops referencing the about-to-be-deleted hook script.
 rm -rf /var/cache/opnsense/volt/* 2>/dev/null
-[ -x /usr/local/sbin/configctl ] && /usr/local/sbin/configctl kea reload >/dev/null 2>&1
+[ -x /usr/local/sbin/configctl ] && /usr/local/sbin/configctl kea restart >/dev/null 2>&1
 /usr/sbin/service configd restart >/dev/null 2>&1
 exit 0
 EOF
