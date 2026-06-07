@@ -1,0 +1,211 @@
+#!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 James (JameZUK)
+"""
+kea-unbound-ddns.py — RFC 2136 stub listener for Kea -> Unbound DNS registration.
+
+Listens on a loopback UDP port, receives DNS UPDATE packets from kea-dhcp-ddns
+(optionally TSIG-authenticated), and applies them to Unbound via the hybrid
+writer (runtime unbound-control + persistent include file).
+
+This is the real-time path. Bulk/initial population from existing Kea leases is
+handled separately by the sync scripts (Phase 5).
+
+Do not run directly in production — it is supervised by daemon(8) via the
+`keaunbound` configd service (start.py / stop.py).
+"""
+
+import argparse
+import logging
+import logging.handlers
+import os
+import signal
+import socket
+import sys
+
+# Make lib/ importable whether installed (/usr/local/opnsense/scripts/keaunbound)
+# or run from a source checkout (../opnsense/scripts/keaunbound relative to sbin).
+_SCRIPTS = os.environ.get("KEAUNBOUND_SCRIPTS", "/usr/local/opnsense/scripts/keaunbound")
+for _cand in (_SCRIPTS,
+              os.path.join(os.path.dirname(__file__), "..", "opnsense", "scripts", "keaunbound")):
+    if os.path.isdir(os.path.join(_cand, "lib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+
+from lib import records as R          # noqa: E402
+from lib.unbound_io import UnboundZone  # noqa: E402
+
+log = logging.getLogger("keaunbound")
+
+
+class StaticGuardCache:
+    """Reload host_entries.conf only when it changes."""
+
+    def __init__(self, path):
+        self.path = path
+        self._mtime = None
+        self._guard = R.StaticGuard(path)
+
+    def get(self):
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            mtime = None
+        if mtime != self._mtime:
+            self._guard = R.StaticGuard(self.path)
+            self._mtime = mtime
+        return self._guard
+
+
+class Listener:
+    def __init__(self, args):
+        self.args = args
+        self.zone = UnboundZone(
+            include_file=args.include_file,
+            unbound_conf=args.unbound_conf,
+            logger=lambda level, msg: getattr(log, level, log.info)(msg),
+        )
+        self.guard = StaticGuardCache(args.host_entries)
+        self.keyring = None
+        self.keyname = None
+        self.keyalgo = None
+        if not args.no_tsig and args.tsig_secret:
+            from lib import tsig
+            self.keyring = tsig.build_keyring(args.tsig_name, args.tsig_secret)
+            self.keyname = args.tsig_name if args.tsig_name.endswith(".") else args.tsig_name + "."
+            self.keyalgo = tsig.algorithm_name(args.tsig_algorithm)
+        self._running = True
+
+    # ---- record operations -----------------------------------------------
+    def _add(self, name, ttl, rtype, rdata):
+        guard = self.guard.get()
+        if rtype == "PTR":
+            if guard.is_static_ptr(name):
+                log.info("Skipped PTR add for %s (static)", name)
+                return
+            self.zone.add(R.Record(name, ttl, "PTR", rdata))
+            return
+        # forward A/AAAA
+        if guard.is_static_forward(name, rtype):
+            log.info("Skipped %s add for %s (static)", rtype, name)
+            return
+        if self.args.aggressive_cleanup:
+            self.zone.remove_other_addresses(name, rtype, rdata)
+        self.zone.add(R.Record(name, ttl, rtype, rdata))
+
+    def _delete(self, name, rtype, rdata):
+        guard = self.guard.get()
+        if rtype == "PTR":
+            if guard.is_static_ptr(name):
+                return
+            self.zone.remove(name, "PTR", rdata)
+            return
+        if rtype in ("A", "AAAA"):
+            if guard.is_static_forward(name, rtype):
+                return
+            self.zone.remove(name, rtype, rdata)
+        elif rtype == "ANY":
+            # delete all our records for the name (forward case)
+            if not guard.is_static_forward(name, "A") and not guard.is_static_forward(name, "AAAA"):
+                self.zone.remove(name)
+
+    # ---- packet handling --------------------------------------------------
+    def handle(self, data, addr, sock):
+        import dns.message
+        import dns.rdataclass
+        import dns.rdatatype
+        import dns.rcode
+
+        try:
+            msg = dns.message.from_wire(data, keyring=self.keyring)
+        except Exception as exc:  # noqa: BLE001 - bad/forged packet, drop
+            log.warning("Dropped packet from %s: %s", addr, exc)
+            return
+
+        for rrset in msg.authority:
+            name = rrset.name.to_text()
+            rtype = dns.rdatatype.to_text(rrset.rdtype)
+            if rrset.rdclass == dns.rdataclass.IN:
+                for rdata in rrset:
+                    self._add(name, rrset.ttl, rtype, rdata.to_text())
+            elif rrset.rdclass in (dns.rdataclass.ANY, dns.rdataclass.NONE):
+                if len(rrset) == 0:
+                    self._delete(name, rtype, None)
+                else:
+                    for rdata in rrset:
+                        self._delete(name, rtype, rdata.to_text())
+
+        # Acknowledge so kea-dhcp-ddns considers the update done.
+        try:
+            resp = dns.message.make_response(msg)
+            resp.set_rcode(dns.rcode.NOERROR)
+            sock.sendto(resp.to_wire(), addr)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to send response to %s: %s", addr, exc)
+
+    # ---- main loop --------------------------------------------------------
+    def serve(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.args.bind, self.args.port))
+        sock.settimeout(1.0)
+        log.info("Listening on %s:%d (tsig=%s)", self.args.bind, self.args.port,
+                 "on" if self.keyring else "off")
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if self._running:
+                    log.error("recv error: %s", exc)
+                continue
+            self.handle(data, addr, sock)
+        sock.close()
+        log.info("Listener stopped")
+
+    def stop(self, *_):
+        self._running = False
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(description="Kea -> Unbound DDNS listener")
+    p.add_argument("--bind", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=53535)
+    p.add_argument("--unbound-conf", default="/var/unbound/unbound.conf")
+    p.add_argument("--host-entries", default="/var/unbound/host_entries.conf")
+    p.add_argument("--include-file", default="/var/unbound/etc/keaunbound.conf")
+    p.add_argument("--tsig-name", default="keaunbound")
+    p.add_argument("--tsig-secret", default="")
+    p.add_argument("--tsig-algorithm", default="hmac-sha256")
+    p.add_argument("--no-tsig", action="store_true")
+    p.add_argument("--aggressive-cleanup", action="store_true")
+    p.add_argument("--log-file", default="/var/log/keaunbound/keaunbound.log")
+    p.add_argument("--foreground", action="store_true")
+    return p.parse_args(argv)
+
+
+def setup_logging(log_file, foreground):
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+    if foreground:
+        h = logging.StreamHandler()
+    else:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        h = logging.handlers.WatchedFileHandler(log_file)
+    h.setFormatter(fmt)
+    log.addHandler(h)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    setup_logging(args.log_file, args.foreground)
+    listener = Listener(args)
+    signal.signal(signal.SIGTERM, listener.stop)
+    signal.signal(signal.SIGINT, listener.stop)
+    listener.serve()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

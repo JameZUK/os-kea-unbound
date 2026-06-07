@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<acl>
+    <page-services-keaunbound>
+        <name>Services: Kea Unbound DDNS</name>
+        <patterns>
+            <pattern>ui/keaunbound/*</pattern>
+            <pattern>api/keaunbound/*</pattern>
+        </patterns>
+    </page-services-keaunbound>
+</acl>

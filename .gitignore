@@ -1,0 +1,11 @@
+# OPNsense plugin build output
+work/
+
+# Built packages
+*.pkg
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.env

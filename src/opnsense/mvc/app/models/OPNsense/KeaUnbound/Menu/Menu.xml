@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<menu>
+    <Services>
+        <KeaUnbound VisibleName="Kea Unbound DDNS" cssClass="fa fa-globe fa-fw" url="/ui/keaunbound/general">
+        </KeaUnbound>
+    </Services>
+</menu>
