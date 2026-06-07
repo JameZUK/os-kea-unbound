@@ -12,6 +12,9 @@ This plugin bridges the gap between the Kea DHCP server (IPv4 & IPv6) and Unboun
 * **Hostname Normalization:** Lowercases hostnames, strips domain suffixes from FQDN inputs, and removes invalid characters to ensure clean DNS entries.
 * **Smart Hostnames:** Automatically generates hostnames from MAC addresses (IPv4) or DUIDs (IPv6) if the client device does not provide one.
 * **Persistence & Repair:** Includes `rc.syshook.d` scripts to ensure patches survive OPNsense firmware updates and system reboots.
+* **Boot Replay:** After a reboot, replays the existing Kea leases into Unbound so DNS is populated immediately instead of waiting for each client to renew. Honors the per-family "Register Leases in Unbound" toggle — if registration is disabled for a family, that family is not replayed.
+* **Status Helper:** Ships a `keaunbound-status` CLI that wraps `unbound-control` against the live config (so you never hit the `control-enable: no` / "connection refused" trap of a bare `unbound-control`).
+* **Bulletproof Install/Uninstall:** Install patches are applied atomically and self-heal via the boot/update repair hooks; uninstall is a true inverse — it strips only the injected blocks (no stale `.bak` restores), scrubs the hook out of the generated Kea config so Kea can never reference a deleted script, and never aborts the package transaction.
 * **Dedicated Logging:** Writes detailed, timestamped activity logs to `/var/log/kea-unbound.log` with automatic rotation via `newsyslog`.
 * **Non-Destructive:** Uses OPNsense's native hook system to inject configuration safely without modifying core system files.
 
@@ -39,7 +42,7 @@ You can install the pre-compiled package directly via the OPNsense shell (SSH).
 
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v3.7.0/os-kea-unbound-3.7.0.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v3.8.0/os-kea-unbound-3.8.0.pkg
 ```
 
 *Note: You may see a "misconfigured" warning next to the plugin in the OPNsense web interface. This is cosmetic and expected when installing packages manually outside of a signed repository.*
@@ -54,7 +57,7 @@ If you prefer to build the package yourself:
 ```sh
 chmod +x build_plugin.sh
 ./build_plugin.sh
-pkg add ./os-kea-unbound-3.7.0.pkg
+pkg add ./os-kea-unbound-3.8.0.pkg
 ```
 
 ## Configuration
@@ -92,7 +95,7 @@ To prevent configuration conflicts or service crashes during an upgrade, follow 
     * Log in via SSH and run:
     ```sh
     pkg delete os-kea-unbound
-    pkg add ./os-kea-unbound-3.7.0.pkg
+    pkg add ./os-kea-unbound-3.8.0.pkg
     ```
 
 3.  **Re-Enable Hooks:**
@@ -141,18 +144,19 @@ tail -f /var/log/kea-unbound.log
 ```
 
 ### 2. Run Health Check
-A diagnostic script is provided to validate the installation. It performs 10 checks:
+A diagnostic script is provided to validate the installation. It performs 11 checks:
 
 1. OPNsense MVC patches (DHCPv4)
 2. OPNsense MVC patches (DHCPv6)
 3. Active Kea configuration
 4. Hook script (exists and is executable)
 5. Plugin registration (`keaunbound.inc`)
-6. Persistence hooks (update + boot repair scripts)
+6. Persistence hooks (update + early-boot repair + start-boot replay)
 7. Log rotation configuration
 8. Unbound connectivity
 9. Python3 availability (required for IPv6 PTR)
 10. `drill` command (required for dual-stack preservation)
+11. `keaunbound-status` helper (exists and is executable)
 
 ```sh
 ./healthcheck.sh
@@ -172,11 +176,21 @@ A comprehensive regression test suite (`test_hook.sh`) validates the hook script
 ```
 
 ### 4. Query Unbound Directly
-Check if a host is resolvable in the live system:
+Use the bundled helper, which always targets the live config — no `-c` flag to remember:
 
 ```sh
-unbound-control -c /var/unbound/unbound.conf list_local_data | grep "smart-device"
+keaunbound-status            # record count + recent log lines
+keaunbound-status list       # list every registered record
+keaunbound-status find smart-device   # filter by hostname or IP
+keaunbound-status replay     # re-run the boot-time lease replay now
+keaunbound-status help       # full command list
 ```
+
+> **Note:** a *bare* `unbound-control list_local_data` reads the compiled-in default config (which has `control-enable: no`) and fails with "connection refused" — it is **not** querying the running resolver. Always pass `-c /var/unbound/unbound.conf`, or just use `keaunbound-status`, which does it for you. The equivalent raw command:
+>
+> ```sh
+> unbound-control -c /var/unbound/unbound.conf list_local_data | grep "smart-device"
+> ```
 
 ## Uninstallation
 
@@ -186,7 +200,14 @@ To remove the plugin and revert all changes:
 pkg delete os-kea-unbound
 ```
 
-This will automatically remove the hook script, rotation configuration, and restore the original Kea configuration files. You should restart the Kea services after uninstallation.
+Uninstall is a true inverse and is safe even after an OPNsense upgrade. It:
+
+* strips **only** the blocks the plugin injected into the OPNsense MVC templates (matched by signature, written atomically) — it does **not** restore install-time `.bak` snapshots, which could be stale;
+* scrubs the plugin's `hooks-libraries` entry out of the generated `kea-dhcp4.conf` / `kea-dhcp6.conf`, so Kea can never reference the now-deleted hook script and fail to start;
+* removes the hook script, helper, rotation config, and persistence/replay hooks;
+* best-effort reloads Kea so the change goes live immediately, and never aborts the package transaction if a step fails.
+
+Any DNS records the plugin added to Unbound at runtime are not persisted and clear on the next Unbound restart.
 
 ## License
 

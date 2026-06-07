@@ -2,7 +2,7 @@
 
 # 1. Define Variables
 PLUGIN_NAME="os-kea-unbound"
-VERSION="3.7.0"
+VERSION="3.8.0"
 BUILD_DIR="./${PLUGIN_NAME}_build"
 STAGE_DIR="${BUILD_DIR}/stage"
 
@@ -16,9 +16,10 @@ UPDATE_HOOK_DIR="${STAGE_DIR}/usr/local/etc/rc.syshook.d/update"
 BOOT_HOOK_DIR="${STAGE_DIR}/usr/local/etc/rc.syshook.d/early"
 START_HOOK_DIR="${STAGE_DIR}/usr/local/etc/rc.syshook.d/start"
 LOG_ROT_DIR="${STAGE_DIR}/usr/local/etc/newsyslog.conf.d"
+BIN_DIR="${STAGE_DIR}/usr/local/bin"
 
 echo ">>> Creating directory structure..."
-mkdir -p "${KEA_SCRIPT_DIR}" "${UPDATE_HOOK_DIR}" "${BOOT_HOOK_DIR}" "${START_HOOK_DIR}" "${LOG_ROT_DIR}"
+mkdir -p "${KEA_SCRIPT_DIR}" "${UPDATE_HOOK_DIR}" "${BOOT_HOOK_DIR}" "${START_HOOK_DIR}" "${LOG_ROT_DIR}" "${BIN_DIR}"
 mkdir -p "${STAGE_DIR}/usr/local/etc/inc/plugins.inc.d"
 
 echo ">>> Generating Plugin Files..."
@@ -259,8 +260,20 @@ LOG="/var/log/kea-unbound.log"
 LEASES4="/var/db/kea/kea-leases4.csv"
 LEASES6="/var/db/kea/kea-leases6.csv"
 UNBOUND_CONF="/var/unbound/unbound.conf"
+KEA4_CONF="/usr/local/etc/kea/kea-dhcp4.conf"
+KEA6_CONF="/usr/local/etc/kea/kea-dhcp6.conf"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG"; }
 [ -x "$HOOK" ] || exit 0
+# Honour the per-family "Register Leases in Unbound" toggle. Live registration
+# only happens when Kea has our hook in its hooks-libraries; replay must obey
+# the same gate, per family, or a disabled plugin would silently re-inject all
+# leases at every boot. Blank the lease path for any family that's switched off.
+grep -q "kea-unbound-hook.sh" "$KEA4_CONF" 2>/dev/null || LEASES4=""
+grep -q "kea-unbound-hook.sh" "$KEA6_CONF" 2>/dev/null || LEASES6=""
+if [ -z "$LEASES4" ] && [ -z "$LEASES6" ]; then
+    log info "Boot replay skipped (registration disabled in Kea config)"
+    exit 0
+fi
 # Wait up to 90s for unbound-control to answer — Unbound takes a moment to
 # come up after boot, and we'd silently fail otherwise.
 i=0
@@ -368,39 +381,154 @@ log info "Boot replay complete (${COUNT:-0} leases replayed)"
 EOF
 chmod 755 "${START_HOOK_DIR}/50-keaunbound-replay"
 
+# --- 1b. The CLI status/query helper ---
+# Convenience wrapper so operators never have to remember the
+# `-c /var/unbound/unbound.conf` flag. A bare `unbound-control` reads the
+# compiled-in default config (control-enable: no on OPNsense) and fails with
+# "connection refused" — the #1 source of "my leases aren't registered!"
+# false alarms. This always targets the live config the hook itself uses.
+cat << 'EOF' > "${BIN_DIR}/keaunbound-status"
+#!/bin/sh
+# keaunbound-status — query/inspect the os-kea-unbound DNS registrations.
+# Wraps unbound-control against the live OPNsense config so you don't have to
+# pass -c /var/unbound/unbound.conf every time.
+UNBOUND_CONF="/var/unbound/unbound.conf"
+LOG_FILE="/var/log/kea-unbound.log"
+REPLAY_HOOK="/usr/local/etc/rc.syshook.d/start/50-keaunbound-replay"
+uc() { unbound-control -c "$UNBOUND_CONF" "$@"; }
+
+usage() {
+    cat <<USAGE
+Usage: keaunbound-status [command]
+
+  (no command)   Show record count + recent log lines (default)
+  count          Print number of local-data records
+  list           List all local-data records
+  find <term>    List records matching <term> (host name or IP, case-insensitive)
+  status         Show unbound-control status
+  log [N]        Tail the last N kea-unbound log lines (default 40)
+  replay         Re-run the boot-time lease replay now
+  uc <args...>   Pass arbitrary args straight to unbound-control (-c handled)
+  help           Show this help
+
+All unbound-control calls target ${UNBOUND_CONF}.
+USAGE
+}
+
+case "${1:-summary}" in
+    summary)
+        if ! uc status >/dev/null 2>&1; then
+            echo "unbound-control unreachable via ${UNBOUND_CONF}" >&2
+            exit 1
+        fi
+        echo "local-data records: $(uc list_local_data 2>/dev/null | grep -c .)"
+        echo "--- recent log (${LOG_FILE}) ---"
+        tail -n 10 "$LOG_FILE" 2>/dev/null
+        ;;
+    count)
+        uc list_local_data 2>/dev/null | grep -c .
+        ;;
+    list)
+        uc list_local_data
+        ;;
+    find)
+        [ -n "$2" ] || { echo "usage: keaunbound-status find <term>" >&2; exit 2; }
+        uc list_local_data 2>/dev/null | grep -i -- "$2"
+        ;;
+    status)
+        uc status
+        ;;
+    log)
+        tail -n "${2:-40}" "$LOG_FILE"
+        ;;
+    replay)
+        [ -x "$REPLAY_HOOK" ] || { echo "replay hook not found: $REPLAY_HOOK" >&2; exit 1; }
+        "$REPLAY_HOOK"
+        ;;
+    uc)
+        shift
+        uc "$@"
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        echo "unknown command: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+EOF
+chmod 755 "${BIN_DIR}/keaunbound-status"
+
 # --- 2. The Python Patcher Logic ---
-PATCH_CMD='import os, shutil
+# Bulletproofing notes:
+#  * Atomic writes (temp file + os.replace) so an interrupted patch can never
+#    leave an OPNsense MVC file half-written / corrupt.
+#  * Every injection is anchored: if the anchor string is missing (e.g. a
+#    future OPNsense refactor renamed it) we record a problem instead of
+#    silently writing nothing, and print a summary the installer/repair hook
+#    surfaces. The boot/update repair hooks retry, so a transient miss heals.
+#  * replace(..., 1) so a repeated anchor cannot inject the block twice.
+#  * NOTE: keep this body free of single quotes — it is embedded inside a
+#    single-quoted shell string and re-used verbatim by the repair hooks.
+PATCH_CMD='import os, shutil, tempfile
 files = [
     {"ctrl": "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings4.xml", "model": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.xml", "php": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.php", "anchor": "dhcpv4.general.dhcp_socket_type", "prefix": "dhcpv4", "key": "Dhcp4"},
     {"ctrl": "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings6.xml", "model": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.xml", "php": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.php", "anchor": "dhcpv6.general.fwrules", "prefix": "dhcpv6", "key": "Dhcp6"}
 ]
+def write_atomic(path, data):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d)
+    try:
+        with os.fdopen(fd, "w") as f: f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except Exception: pass
+        raise
+problems = []
 for fset in files:
-    if not os.path.exists(fset["ctrl"]): continue
+    if not os.path.exists(fset["ctrl"]):
+        continue
     for fpath in [fset["ctrl"], fset["model"], fset["php"]]:
-        if not os.path.exists(fpath + ".bak"): shutil.copy2(fpath, fpath + ".bak")
-    
-    with open(fset["ctrl"], "r") as f: content = f.read()
-    if "registerDynamicLeases" not in content:
-        field = "    <field>\n        <id>" + fset["prefix"] + ".general.registerDynamicLeases</id>\n"
-        field += "        <label>Register Leases in Unbound (via os-kea-unbound)</label>\n"
-        field += "        <type>checkbox</type>\n        <help>Enable DNS registration (Plugin Feature).</help>\n    </field>\n"
-        content = content.replace("<field>\n        <id>" + fset["anchor"], field + "    <field>\n        <id>" + fset["anchor"])
-        with open(fset["ctrl"], "w") as f: f.write(content)
-
-    with open(fset["model"], "r") as f: content = f.read()
-    if "registerDynamicLeases" not in content:
-        m_node = "            <registerDynamicLeases type=\"BooleanField\">\n                <default>0</default>\n            </registerDynamicLeases>\n"
-        content = content.replace("</general>", m_node + "        </general>")
-        with open(fset["model"], "w") as f: f.write(content)
-
-    with open(fset["php"], "r") as f: content = f.read()
-    if "kea-unbound-hook.sh" not in content:
-        p_code = "        if ((string)$this->general->registerDynamicLeases === \"1\") {\n"
-        p_code += "            if (!isset($cnf[\"" + fset["key"] + "\"][\"hooks-libraries\"])) $cnf[\"" + fset["key"] + "\"][\"hooks-libraries\"] = [];\n"
-        p_code += "            $cnf[\"" + fset["key"] + "\"][\"hooks-libraries\"][] = [\"library\" => \"/usr/local/lib/kea/hooks/libdhcp_run_script.so\", \"parameters\" => [\"name\" => \"/usr/local/share/kea/scripts/kea-unbound-hook.sh\", \"sync\" => false]];\n"
-        p_code += "        }\n"
-        content = content.replace("File::file_put_contents", p_code + "        File::file_put_contents")
-        with open(fset["php"], "w") as f: f.write(content)'
+        if os.path.exists(fpath) and not os.path.exists(fpath + ".bak"):
+            try: shutil.copy2(fpath, fpath + ".bak")
+            except Exception: pass
+    try:
+        with open(fset["ctrl"]) as f: content = f.read()
+        if "registerDynamicLeases" not in content:
+            field = "    <field>\n        <id>" + fset["prefix"] + ".general.registerDynamicLeases</id>\n"
+            field += "        <label>Register Leases in Unbound (via os-kea-unbound)</label>\n"
+            field += "        <type>checkbox</type>\n        <help>Enable DNS registration (Plugin Feature).</help>\n    </field>\n"
+            anchor = "<field>\n        <id>" + fset["anchor"]
+            if anchor in content:
+                write_atomic(fset["ctrl"], content.replace(anchor, field + "    " + anchor, 1))
+            else:
+                problems.append(fset["prefix"] + ": form anchor not found")
+        with open(fset["model"]) as f: content = f.read()
+        if "registerDynamicLeases" not in content:
+            m_node = "            <registerDynamicLeases type=\"BooleanField\">\n                <default>0</default>\n            </registerDynamicLeases>\n"
+            if "</general>" in content:
+                write_atomic(fset["model"], content.replace("</general>", m_node + "        </general>", 1))
+            else:
+                problems.append(fset["prefix"] + ": model general node not found")
+        with open(fset["php"]) as f: content = f.read()
+        if "kea-unbound-hook.sh" not in content:
+            p_code = "        if ((string)$this->general->registerDynamicLeases === \"1\") {\n"
+            p_code += "            if (!isset($cnf[\"" + fset["key"] + "\"][\"hooks-libraries\"])) $cnf[\"" + fset["key"] + "\"][\"hooks-libraries\"] = [];\n"
+            p_code += "            $cnf[\"" + fset["key"] + "\"][\"hooks-libraries\"][] = [\"library\" => \"/usr/local/lib/kea/hooks/libdhcp_run_script.so\", \"parameters\" => [\"name\" => \"/usr/local/share/kea/scripts/kea-unbound-hook.sh\", \"sync\" => false]];\n"
+            p_code += "        }\n"
+            if "File::file_put_contents" in content:
+                write_atomic(fset["php"], content.replace("File::file_put_contents", p_code + "        File::file_put_contents", 1))
+            else:
+                problems.append(fset["prefix"] + ": php config anchor not found")
+    except Exception as e:
+        problems.append(fset["prefix"] + ": " + str(e))
+if problems:
+    print("kea-unbound: UI patch warnings: " + "; ".join(problems))
+else:
+    print("kea-unbound: UI patch OK")'
 
 # --- 3. Persistence Hooks & Log Rotation ---
 HOOK_CONTENT="#!/bin/sh
@@ -423,24 +551,48 @@ echo "<?php function keaunbound_configure() { return; }" > "${STAGE_DIR}/usr/loc
 # --- 5. Installation Scripts ---
 cat << EOF > "${BUILD_DIR}/+POST_INSTALL"
 #!/bin/sh
-mkdir -p /usr/local/share/kea/scripts
-chmod 755 /usr/local/share/kea /usr/local/share/kea/scripts
-touch /var/log/kea-unbound.log
-chmod 644 /var/log/kea-unbound.log
-/usr/local/bin/python3 -c '$PATCH_CMD'
-rm -rf /var/cache/opnsense/volt/*
-/usr/sbin/service configd restart
+# Bulletproof install: every step is best-effort and independent so a single
+# failure never aborts the pkg transaction or leaves a half-installed plugin.
+# The UI patch self-heals on the next boot/update via the repair hooks even if
+# it cannot be applied right now.
+mkdir -p /usr/local/share/kea/scripts 2>/dev/null
+chmod 755 /usr/local/share/kea /usr/local/share/kea/scripts 2>/dev/null
+chmod 755 /usr/local/bin/keaunbound-status 2>/dev/null
+touch /var/log/kea-unbound.log 2>/dev/null
+chmod 644 /var/log/kea-unbound.log 2>/dev/null
+if [ -x /usr/local/bin/python3 ]; then
+    /usr/local/bin/python3 -c '$PATCH_CMD' || echo "kea-unbound: UI patch step failed; the boot/update repair hook will retry."
+else
+    echo "kea-unbound: python3 not found; UI patch deferred to the repair hook."
+fi
+rm -rf /var/cache/opnsense/volt/* 2>/dev/null
+/usr/sbin/service configd restart >/dev/null 2>&1 || true
 echo "Plugin installed. Please go to Services > Kea DHCP > Settings."
 EOF
 
 cat << 'EOF' > "${BUILD_DIR}/+PRE_DEINSTALL"
 #!/bin/sh
-# Issue #9: do NOT restore the .bak files. They were captured at install
-# time; if OPNsense was upgraded since, restoring them would roll those
-# files back to an older shape and break the system. Instead, strip just
-# the blocks we injected (matched by signature), then discard the .bak.
-/usr/local/bin/python3 - <<'PYEOF'
-import os, re
+# Bulletproof uninstall: never abort the pkg transaction, and leave the box in
+# a clean, working state even after an OPNsense upgrade.
+#  Step 1 (issue #9): do NOT restore .bak files (captured at install time; may
+#          be stale after an OPNsense upgrade). Strip only the blocks we
+#          injected, matched by signature, with atomic writes; discard the .bak.
+#  Step 2: scrub our hook out of the *generated* kea-dhcp{4,6}.conf so Kea never
+#          references the about-to-be-deleted hook script and fails to start.
+#  Step 3: best-effort reload so the change goes live now.
+[ -x /usr/local/bin/python3 ] && /usr/local/bin/python3 - <<'PYEOF'
+import os, re, json, tempfile
+def write_atomic(path, data):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d)
+    try:
+        with os.fdopen(fd, "w") as f: f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except Exception: pass
+
+# --- Step 1: un-patch the OPNsense MVC templates ---
 sets = [
     {"ctrl": "/usr/local/opnsense/mvc/app/controllers/OPNsense/Kea/forms/generalSettings4.xml",
      "model": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv4.xml",
@@ -449,9 +601,12 @@ sets = [
      "model": "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.xml",
      "php":   "/usr/local/opnsense/mvc/app/models/OPNsense/Kea/KeaDhcpv6.php"},
 ]
-ctrl_re  = re.compile(r"    <field>\s*<id>[^<]*registerDynamicLeases[^<]*</id>.*?</field>\s*\n", re.DOTALL)
-model_re = re.compile(r"\s*<registerDynamicLeases[^>]*>.*?</registerDynamicLeases>\s*\n", re.DOTALL)
-php_re   = re.compile(r"        if \(\(string\)\$this->general->registerDynamicLeases === \"1\"\) \{.*?\n        \}\n", re.DOTALL)
+ctrl_re  = re.compile(r"[ \t]*<field>\s*<id>[^<]*registerDynamicLeases[^<]*</id>.*?</field>[ \t]*\n", re.DOTALL)
+model_re = re.compile(r"[ \t]*<registerDynamicLeases[^>]*>.*?</registerDynamicLeases>[ \t]*\n", re.DOTALL)
+# [ \t]* (not the literal 8-space prefix) so the leading indentation injected
+# ahead of the block is removed too — a true inverse with no whitespace drift
+# across repeated install/uninstall cycles.
+php_re   = re.compile(r"[ \t]*if \(\(string\)\$this->general->registerDynamicLeases === \"1\"\) \{.*?\n[ \t]*\}\n", re.DOTALL)
 def strip(path, pat):
     if not os.path.exists(path):
         return
@@ -460,8 +615,7 @@ def strip(path, pat):
             c = f.read()
         c2 = pat.sub("", c, count=1)
         if c2 != c:
-            with open(path, "w") as f:
-                f.write(c2)
+            write_atomic(path, c2)
     except Exception:
         pass
 for s in sets:
@@ -473,9 +627,48 @@ for s in sets:
         if os.path.exists(bak):
             try: os.remove(bak)
             except Exception: pass
+
+# --- Step 2: scrub our hook from the generated Kea config(s) ---
+for conf, root in (("/usr/local/etc/kea/kea-dhcp4.conf", "Dhcp4"),
+                   ("/usr/local/etc/kea/kea-dhcp6.conf", "Dhcp6")):
+    if not os.path.exists(conf):
+        continue
+    try:
+        with open(conf) as f:
+            cfg = json.load(f)
+    except Exception:
+        continue
+    node = cfg.get(root)
+    if not isinstance(node, dict):
+        continue
+    hooks = node.get("hooks-libraries")
+    if not isinstance(hooks, list):
+        continue
+    kept = []
+    for h in hooks:
+        name = ""
+        if isinstance(h, dict) and isinstance(h.get("parameters"), dict):
+            name = str(h["parameters"].get("name", ""))
+        if "kea-unbound-hook.sh" in name:
+            continue
+        kept.append(h)
+    if len(kept) == len(hooks):
+        continue
+    if kept:
+        node["hooks-libraries"] = kept
+    else:
+        node.pop("hooks-libraries", None)
+    try:
+        write_atomic(conf, json.dumps(cfg, indent=2))
+    except Exception:
+        pass
 PYEOF
-rm -rf /var/cache/opnsense/volt/*
-/usr/sbin/service configd restart
+
+# --- Step 3: best-effort make the change live (guarded; never abort) ---
+rm -rf /var/cache/opnsense/volt/* 2>/dev/null
+[ -x /usr/local/sbin/configctl ] && /usr/local/sbin/configctl kea reload >/dev/null 2>&1
+/usr/sbin/service configd restart >/dev/null 2>&1
+exit 0
 EOF
 chmod +x "${BUILD_DIR}/+POST_INSTALL" "${BUILD_DIR}/+PRE_DEINSTALL"
 
@@ -495,6 +688,7 @@ licenses: [BSD2CLAUSE]
 EOF
 
 cat << EOF > "${BUILD_DIR}/plist"
+/usr/local/bin/keaunbound-status
 /usr/local/share/kea/scripts/kea-unbound-hook.sh
 /usr/local/etc/inc/plugins.inc.d/keaunbound.inc
 /usr/local/etc/rc.syshook.d/update/50-keaunbound-repair
