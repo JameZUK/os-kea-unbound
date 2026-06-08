@@ -86,6 +86,17 @@ loopback listener.
   runtime local_data).
 - Version: start at 0.1.
 - Package name: keep `os-kea-unbound`.
+- **Scope: DYNAMIC leases only.** Kea+Unbound have no native dynamic-lease DNS —
+  that is this plugin's sole purpose. OPNsense itself already registers
+  reservations and manual Host Overrides (host_entries.conf, forward+reverse), so
+  the plugin registers only *non-reserved* leases and never adds/deletes/cleans a
+  reserved or statically-owned name. (Each dynamic lease still gets both A/AAAA
+  and PTR.) This avoids `unbound-control local_data_remove <name>` — which deletes
+  ALL records at a name — ever evicting OPNsense's static records from runtime.
+  *(Learned from a prod incident: clean/reconcile touched reservation names, the
+  name-wide remove evicted OPNsense's records, and hostname-based firewall aliases
+  went NXDOMAIN. clean now skips owned names and aborts on an anomalous
+  (partial-control-socket) prune; the daily cron is the hardened reconcile.)*
 - **DNS UPDATE prerequisites: intentionally ignored; always reply NOERROR.** The
   zone has a single owner (Kea via D2). Honouring RFC 2136 prerequisites means
   RFC 4703 conflict resolution, which is DHCID-based — and we deliberately do NOT
