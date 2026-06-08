@@ -13,3 +13,5 @@ __pycache__/
 # Playwright MCP run artifacts + screenshots
 .playwright-mcp/
 *.png
+# ...but keep the committed documentation screenshots
+!docs/img/*.png
