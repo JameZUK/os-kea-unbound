@@ -86,13 +86,26 @@ manages:
 
 ## Install
 
-Build from the OPNsense plugins tree on an OPNsense/FreeBSD host:
+Install the latest release directly on OPNsense:
+
+```sh
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.1.0/os-kea-unbound-0.1.pkg
+```
+
+Then enable it under **Services → Kea Unbound DDNS → Settings** (see below). To
+remove it later, `pkg delete os-kea-unbound` (or untick Enable first to revert
+cleanly — see *Uninstall*).
+
+## Build from source
+
+To build the package yourself, build from the OPNsense plugins tree on an
+OPNsense/FreeBSD host:
 
 ```sh
 git clone https://github.com/opnsense/plugins /usr/plugins
 git clone https://github.com/JameZUK/os-kea-unbound /usr/plugins/dns/kea-unbound
 cd /usr/plugins/dns/kea-unbound
-make package          # -> work/pkg/os-kea-unbound-0.x.pkg
+make package          # -> work/pkg/os-kea-unbound-0.1.pkg
 pkg add work/pkg/os-kea-unbound-*.pkg
 ```
 
