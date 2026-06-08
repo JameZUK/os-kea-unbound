@@ -1,4 +1,4 @@
-# os-kea-unbound (DDNS edition, 0.x)
+# os-kea-unbound (DDNS edition, v0.1.0)
 
 **OPNsense plugin: register dynamic Kea DHCP leases in Unbound DNS — automatically, with no core-file patching.**
 
