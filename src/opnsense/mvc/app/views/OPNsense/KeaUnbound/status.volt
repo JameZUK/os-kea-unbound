@@ -32,7 +32,9 @@
     var logStep = 500;             // how many more "Load more" pulls
     var logMax = 20000;            // hard cap (matches backend)
     function refreshLog() {
-        ajaxGet("/api/keaunbound/status/log", {count: logCount}, function (data, status) {
+        // count goes in the URL (not the ajaxGet data object): a GET with a body
+        // is handled inconsistently across browsers (empties out under Firefox).
+        ajaxGet("/api/keaunbound/status/log?count=" + logCount, {}, function (data, status) {
             if (!data || data.status === 'failed') { return; }
             var lines = data.lines || [];
             var el = document.getElementById("st_log");
@@ -90,7 +92,7 @@
 <div class="content-box" style="margin-top:1em; padding:1em;">
     <strong>{{ lang._('Recent activity') }}</strong>
     <span id="st_log_info" class="text-muted" style="margin-left:0.5em;"></span>
-    <pre id="st_log" style="margin-top:0.5em; max-height:480px; overflow:auto;">-</pre>
+    <pre id="st_log" style="margin-top:0.5em; max-height:480px; overflow-y:auto; overflow-x:hidden; white-space:pre-wrap; overflow-wrap:anywhere;">-</pre>
     <div style="margin-top:0.5em;">
         <button class="btn btn-default btn-xs" id="logMore" type="button">
             <i class="fa fa-angle-double-up"></i> {{ lang._('Load more') }}
