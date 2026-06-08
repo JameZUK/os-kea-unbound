@@ -87,6 +87,17 @@ and seeds existing leases/reservations. Optional:
   ```
 - Logs: `/var/log/keaunbound/keaunbound.log` (rotated by newsyslog).
 
+## A note on the Unbound "manual overwrites" notice
+
+After enabling, the Unbound settings page shows: *"The configuration contains
+manual overwrites, these may interfere with the settings configured here."* This is
+**expected and benign.** The plugin persists its records in
+`/usr/local/etc/unbound.opnsense.d/keaunbound.conf` — OPNsense's documented
+custom-include source dir, which is the only way records survive an Unbound
+restart. OPNsense flags any custom include there with that generic notice. Our
+file only *adds* `local-data:` records; it does not change any Unbound setting, so
+nothing actually interferes. The notice clears if you disable/uninstall the plugin.
+
 ## Uninstall
 
 Disabling the plugin (Settings → untick Enable → Save) fully reverts everything:
