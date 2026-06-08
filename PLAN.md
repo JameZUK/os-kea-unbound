@@ -105,9 +105,17 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **6 — Status page** (Services → Kea Unbound DDNS → Status: listener health, record count, TSIG, Kea-DDNS ownership, recent log, "Sync now") — data verified on the test box
 - [x] **7 — clean uninstall/teardown** (shared teardown.php: revert Kea DDNS iff owned, stop listener, flush records + remove include file, regenerate clean Kea; wired to the disable path AND a +PRE_DEINSTALL) — verified on the test box
 - [x] **8 — audit/clean + logs + docs** (lib/kea_source shared source-of-truth; `audit`/`clean` configd actions with a Kea-reachability guard against wiping; newsyslog rotation; README rewritten) — verified on the test box
-- [ ] **9 — Tests + release (tag 0.1)** (package build on a plugins tree; verify +PRE_DEINSTALL at pkg-time; CI; tag)
+- [x] **9 — package build + lifecycle** (built a 0.1 .pkg with `pkg create`, clean install + run, and `pkg delete` ran the `+PRE_DEINSTALL` teardown with full revert; 25 unit tests pass) — verified on the test box
 
 Phases 0–3 need no router. Phase 4 is the first on-box milestone.
+
+### Remaining release steps (need a push / build host)
+- Run the **official `make package`** on an OPNsense plugins tree (the test box has no
+  git/plugins tree, so 9 was validated with a hand-built `pkg create` — the package
+  STRUCTURE and lifecycle are proven; the official build adds OPNsense firmware metadata).
+- Remove the retired v3.x files (`build_plugin.sh`, `healthcheck.sh`, `test_hook.sh`) from
+  this line before release.
+- Tag **0.1** and (optionally) set up CI to run the pytest suite.
 
 ## Layout
 
