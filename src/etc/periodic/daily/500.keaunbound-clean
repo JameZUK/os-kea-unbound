@@ -1,0 +1,9 @@
+#!/bin/sh
+# os-kea-unbound: daily reconcile — prune Unbound DDNS records that Kea no longer
+# knows about. Belt-and-braces only: Kea already sends DDNS removals on lease
+# release/decline/expiry, so this just catches drift (a dropped UDP NCR, an
+# out-of-band change). Run by FreeBSD periodic(8) via OPNsense's "periodic daily"
+# crontab entry. No-ops when the plugin is disabled (clean.py guards on settings).
+[ -x /usr/local/sbin/configctl ] || exit 0
+/usr/local/sbin/configctl keaunbound clean >/dev/null 2>&1
+exit 0

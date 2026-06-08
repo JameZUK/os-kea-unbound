@@ -86,6 +86,21 @@ loopback listener.
   runtime local_data).
 - Version: start at 0.1.
 - Package name: keep `os-kea-unbound`.
+- **DNS UPDATE prerequisites: intentionally ignored; always reply NOERROR.** The
+  zone has a single owner (Kea via D2). Honouring RFC 2136 prerequisites means
+  RFC 4703 conflict resolution, which is DHCID-based — and we deliberately do NOT
+  write DHCID (it dragged names into local_data_remove and clobbered co-located
+  records). Honouring prereqs without DHCID would *break* Kea's update dance
+  (its "name in use?" prereq fails against our existing record, the DHCID
+  fallback we can't satisfy, so Kea gives up). For a single-owner zone
+  last-write-wins is correct; the only thing forgone is arbitration between two
+  different clients claiming the same hostname (rare, benign). Also why the
+  listener replies BEFORE doing the zone work (nothing to learn from the prereqs).
+- **Stale pruning: Kea-driven + a daily reconcile.** Kea sends DDNS removals on
+  lease release/decline and reclaims expired leases (which also remove), so
+  records drop as leases go away. `etc/periodic/daily/500.keaunbound-clean` runs
+  `configctl keaunbound clean` once a day as belt-and-braces to catch drift (a
+  dropped UDP NCR, an out-of-band change). No-ops when the plugin is disabled.
 
 ## Carried over from v3.8
 
