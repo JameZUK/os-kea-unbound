@@ -34,7 +34,23 @@ def test_patch_dhcp_global_and_subnet_override(tmp_path):
     subs = c["subnet4"]
     assert "ddns-send-updates" not in subs[0]      # false stripped -> inherits global true
     assert subs[1]["ddns-send-updates"] is True     # explicit true preserved
+    # master switch (dhcp-ddns.enable-updates) must be set, pointed at D2's default
+    assert c["dhcp-ddns"]["enable-updates"] is True
+    assert c["dhcp-ddns"]["server-ip"] == "127.0.0.1"
+    assert c["dhcp-ddns"]["server-port"] == 53001
+    assert c["ddns-update-on-renew"] is True        # defaults on
     assert m.patch_dhcp(str(p), "Dhcp4", SETTINGS) is False  # idempotent
+
+
+def test_patch_dhcp_update_on_renew_off(tmp_path):
+    m = load_injector(tmp_path)
+    p = tmp_path / "k4.json"
+    json.dump({"Dhcp4": {"subnet4": []}}, open(p, "w"))
+    settings = dict(SETTINGS, update_on_renew=False)
+    assert m.patch_dhcp(str(p), "Dhcp4", settings) is True
+    c = json.load(open(p))["Dhcp4"]
+    assert c["ddns-update-on-renew"] is False
+    assert c["dhcp-ddns"]["enable-updates"] is True   # master switch unaffected
 
 
 def test_patch_d2_preserves_user_config(tmp_path):

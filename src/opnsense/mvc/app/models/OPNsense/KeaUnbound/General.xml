@@ -47,6 +47,11 @@
                 <Required>Y</Required>
                 <description>On a new address for a host, remove older addresses Kea no longer recognises for that host.</description>
             </aggressive_cleanup>
+            <update_on_renew type="BooleanField">
+                <Default>1</Default>
+                <Required>Y</Required>
+                <description>Re-assert a host's DNS records on every lease renewal, not just on a new/changed lease. More resilient (records self-repair on the next renewal) at the cost of more DDNS traffic on busy networks. Off = update only when a lease is new or its address changes.</description>
+            </update_on_renew>
             <!-- internal bookkeeping (not shown in the form): set when THIS plugin
                  enabled Kea's DDNS daemon, so we revert it on disable/uninstall only
                  if it was off before we touched it. -->

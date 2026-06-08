@@ -76,6 +76,7 @@ def load_settings():
     return {
         "port": int(_text(gen, "listener_port", "53535") or 53535),
         "suffix": suffix,
+        "update_on_renew": _text(gen, "update_on_renew", "1") == "1",
         "tsig": _text(gen, "tsig_enabled", "1") == "1" and bool(tsig_secret),
         "tsig_name": (_text(gen, "tsig_key_name", "keaunbound") or "keaunbound"),
         "tsig_secret": tsig_secret,
@@ -141,7 +142,7 @@ def patch_dhcp(path, root_key, s):
         "ncr-protocol": "UDP",
         "ncr-format": "JSON",
     }
-    node["ddns-update-on-renew"] = True
+    node["ddns-update-on-renew"] = bool(s.get("update_on_renew", True))
     # OPNsense emits a per-subnet "ddns-send-updates": false (no per-subnet DDNS
     # server is set), which would OVERRIDE our global true via Kea's subnet>global
     # inheritance. Strip ONLY that false default (never an explicit user true) so

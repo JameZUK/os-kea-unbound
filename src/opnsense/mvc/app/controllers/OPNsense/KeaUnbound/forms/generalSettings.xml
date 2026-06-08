@@ -18,6 +18,13 @@
         <help>When a host gets a new address, remove older addresses Kea no longer recognises for that host.</help>
     </field>
     <field>
+        <id>general.general.update_on_renew</id>
+        <label>Update on renew</label>
+        <type>checkbox</type>
+        <advanced>true</advanced>
+        <help>Re-assert DNS records on every lease renewal (more resilient, more DDNS traffic). Off = update only on a new or changed lease.</help>
+    </field>
+    <field>
         <id>general.general.tsig_enabled</id>
         <label>TSIG authentication</label>
         <type>checkbox</type>
