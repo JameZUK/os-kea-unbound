@@ -112,28 +112,35 @@ class Listener:
     # ---- packet handling --------------------------------------------------
     def handle(self, data, addr, sock):
         import dns.message
-        import dns.rdataclass
         import dns.rdatatype
         import dns.rcode
 
         try:
             msg = dns.message.from_wire(data, keyring=self.keyring)
-        except Exception as exc:  # noqa: BLE001 - bad/forged packet, drop
+        except Exception as exc:  # noqa: BLE001 - bad/forged/unverifiable packet, drop
             log.warning("Dropped packet from %s: %s", addr, exc)
             return
 
+        # When TSIG is configured, require a verified TSIG. from_wire raises on a
+        # bad/unknown key, but an UNSIGNED message parses fine — reject it here so
+        # an unauthenticated sender can't inject records.
+        if self.keyring is not None and not getattr(msg, "had_tsig", False):
+            log.warning("Dropped unsigned UPDATE from %s (TSIG required)", addr)
+            return
+
+        # RFC 2136 operation is carried in each RRset's `.deleting` (dnspython):
+        #   None -> add; NONE -> delete a specific RR; ANY -> delete an RRset / all.
         for rrset in msg.authority:
             name = rrset.name.to_text()
             rtype = dns.rdatatype.to_text(rrset.rdtype)
-            if rrset.rdclass == dns.rdataclass.IN:
+            if rrset.deleting is None:
                 for rdata in rrset:
                     self._add(name, rrset.ttl, rtype, rdata.to_text())
-            elif rrset.rdclass in (dns.rdataclass.ANY, dns.rdataclass.NONE):
-                if len(rrset) == 0:
-                    self._delete(name, rtype, None)
-                else:
-                    for rdata in rrset:
-                        self._delete(name, rtype, rdata.to_text())
+            elif len(rrset) == 0:
+                self._delete(name, rtype, None)
+            else:
+                for rdata in rrset:
+                    self._delete(name, rtype, rdata.to_text())
 
         # Acknowledge so kea-dhcp-ddns considers the update done.
         try:
