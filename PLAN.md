@@ -102,7 +102,7 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **4 — kea_sync injector + D2 auto-enable** (verified end-to-end on the test box)
 - [x] **4.5 — config safety** (record-before-mutate + revert, non-destructive D2 merge, atomic, alerts)
 - [x] **5 — static sync** (seed existing leases + reservations; control socket primary, CSV fallback, NO KCA needed) — verified on the test box
-- [ ] **6 — Status page + helper**
+- [x] **6 — Status page** (Services → Kea Unbound DDNS → Status: listener health, record count, TSIG, Kea-DDNS ownership, recent log, "Sync now") — data verified on the test box
 - [ ] **7 — Disable/uninstall cleanliness**
 - [ ] **8 — Audit/clean + logs + docs**
 - [ ] **9 — Tests + release (tag 0.1)**

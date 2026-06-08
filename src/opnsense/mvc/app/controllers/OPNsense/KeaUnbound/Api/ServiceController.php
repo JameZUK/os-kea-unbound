@@ -80,4 +80,17 @@ class ServiceController extends ApiMutableServiceControllerBase
         }
         return ['status' => 'ok'];
     }
+
+    /**
+     * Seed existing Kea leases + reservations into Unbound on demand
+     * (the Status page "Sync now" button).
+     */
+    public function syncAction()
+    {
+        if (!$this->request->isPost()) {
+            return ['status' => 'failed'];
+        }
+        $output = (new Backend())->configdRun('keaunbound sync');
+        return ['status' => 'ok', 'output' => trim((string)$output)];
+    }
 }

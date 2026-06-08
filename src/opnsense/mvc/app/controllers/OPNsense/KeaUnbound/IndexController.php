@@ -17,4 +17,10 @@ class IndexController extends BaseIndexController
         $this->view->generalForm = $this->getForm('generalSettings');
         $this->view->pick('OPNsense/KeaUnbound/index');
     }
+
+    public function statusAction()
+    {
+        $this->view->title = gettext('Kea Unbound DDNS - Status');
+        $this->view->pick('OPNsense/KeaUnbound/status');
+    }
 }
