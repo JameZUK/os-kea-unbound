@@ -11,9 +11,16 @@
                 multiSelect: false,
                 rowCount: [20, 50, 100, 200, -1],
                 formatters: {
+                    // escape all free-text columns: record names/hostnames originate
+                    // from DHCP clients, so they must never be rendered as raw HTML.
+                    "esc": function (column, row) {
+                        var v = row[column.id];
+                        return $('<div>').text(v == null ? '' : v).html();
+                    },
                     "scope": function (column, row) {
                         var cls = row.scope === 'reverse' ? 'label-default' : 'label-info';
-                        return '<span class="label ' + cls + '">' + row.scope + '</span>';
+                        return '<span class="label ' + cls + '">' +
+                            $('<div>').text(row.scope == null ? '' : row.scope).html() + '</span>';
                     },
                     "expires": function (column, row) {
                         if (!row.expires || row.expires == 0) {
@@ -36,14 +43,14 @@
            data-store-selection="false">
         <thead>
             <tr>
-                <th data-column-id="name" data-sortable="true">{{ lang._('Name') }}</th>
-                <th data-column-id="type" data-sortable="true" data-width="5em">{{ lang._('Type') }}</th>
+                <th data-column-id="name" data-sortable="true" data-formatter="esc">{{ lang._('Name') }}</th>
+                <th data-column-id="type" data-sortable="true" data-width="5em" data-formatter="esc">{{ lang._('Type') }}</th>
                 <th data-column-id="scope" data-sortable="true" data-width="8em" data-formatter="scope">{{ lang._('Scope') }}</th>
-                <th data-column-id="value" data-sortable="true">{{ lang._('Data') }}</th>
-                <th data-column-id="hostname" data-sortable="true">{{ lang._('Hostname') }}</th>
-                <th data-column-id="hwaddr" data-sortable="true">{{ lang._('MAC / DUID') }}</th>
-                <th data-column-id="subnet" data-sortable="true" data-width="6em">{{ lang._('Subnet') }}</th>
-                <th data-column-id="source" data-sortable="true" data-width="8em">{{ lang._('Source') }}</th>
+                <th data-column-id="value" data-sortable="true" data-formatter="esc">{{ lang._('Data') }}</th>
+                <th data-column-id="hostname" data-sortable="true" data-formatter="esc">{{ lang._('Hostname') }}</th>
+                <th data-column-id="hwaddr" data-sortable="true" data-formatter="esc">{{ lang._('MAC / DUID') }}</th>
+                <th data-column-id="subnet" data-sortable="true" data-width="6em" data-formatter="esc">{{ lang._('Subnet') }}</th>
+                <th data-column-id="source" data-sortable="true" data-width="8em" data-formatter="esc">{{ lang._('Source') }}</th>
                 <th data-column-id="expires" data-sortable="true" data-formatter="expires">{{ lang._('Expires') }}</th>
                 <th data-column-id="ttl" data-sortable="true" data-type="numeric" data-width="5em">{{ lang._('TTL') }}</th>
             </tr>

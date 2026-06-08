@@ -21,6 +21,23 @@ class GeneralController extends ApiMutableModelControllerBase
     protected static $internalModelName = 'general';
     protected static $internalModelClass = 'OPNsense\KeaUnbound\General';
 
+    /**
+     * Never expose the auto-generated TSIG secret over the API. The settings form
+     * does not display or post it, and the listener/injector read it straight from
+     * config.xml — so there is no reason for it to appear in /general/get (where it
+     * would otherwise be visible in browser devtools, proxies, etc.).
+     */
+    public function getAction()
+    {
+        $result = parent::getAction();
+        // model fields live under <internalModelName>.general.* (the model's
+        // top-level container is itself named "general").
+        if (isset($result[static::$internalModelName]['general']['tsig_key_secret'])) {
+            $result[static::$internalModelName]['general']['tsig_key_secret'] = '';
+        }
+        return $result;
+    }
+
     public function setAction()
     {
         if ($this->request->isPost()) {
