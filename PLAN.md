@@ -124,8 +124,9 @@ Every tool/feature exercised on real hardware (see tests/integration/). All gree
 - **audit/clean:** stale detected + pruned; reachability-guarded.
 - **Config safety + teardown:** ownership marker record/revert; full clean revert.
 - **Package:** pkg build + clean install + `+PRE_DEINSTALL` teardown on delete.
-- **GUI (Playwright):** Settings + Status render with live data; Sync now works.
-- **Unit:** 25/25.
+- **GUI (Playwright):** Settings + Status + Records render with live data; Sync now works.
+- **Unit:** 28/28. **Integration:** 10 listener + 27 extra (incl. dual-stack ANY-delete,
+  reservation guard, lease lifecycle, multi-RRset, v6→v4 ordering).
 
 Three real bugs found and fixed by this pass:
 1. Listener treated every UPDATE as an add (branched on `rdclass`, not dnspython's
@@ -134,10 +135,57 @@ Three real bugs found and fixed by this pass:
 3. Persistence — wrote the include to the chroot `/var/unbound/etc/` (wiped on every
    unbound start); must write the source `/usr/local/etc/unbound.opnsense.d/`.
 
-NOT yet exercised (needs a real DHCP client — the prod step): Kea allocating a live
-lease -> generating an NCR -> D2 -> listener. D2 config + the listener's RFC 2136/TSIG
-handling are both verified; only Kea's own NCR generation is unproven. (Synthetic NCR
-injection isn't viable — Kea's UDP NCR wire format is not raw JSON.)
+The full client -> Kea NCR -> D2 -> listener path was later proven on a live production
+network (see below); synthetic NCR injection isn't viable (Kea's UDP NCR wire format is
+not raw JSON), so a real client was the only way to exercise it.
+
+## Production migration & live-client findings
+
+Migrated a live prod firewall from the v3.8 patch-based edition to 0.x (clean uninstall
+reverted the core patches; staged install + enable). The real client traffic exercised
+paths the isolated test box could not, and surfaced four issues — all fixed, regression-
+tested (v4 + v6), and verified live:
+
+1. **No NCRs at all.** The injector set `ddns-send-updates: true` but never wrote the
+   `dhcp-ddns` block, so Kea's master switch `dhcp-ddns.enable-updates` stayed false
+   (Kea logged "DDNS: disabled"). Now inject `dhcp-ddns {enable-updates, server-ip,
+   server-port}` pointed at D2 (127.0.0.1:53001) + `ddns-update-on-renew: true`.
+2. **Forward catch-all `.` does not work in Kea D2** (it matches by DNS suffix →
+   `DHCP_DDNS_NO_MATCH`). Register the qualifying-suffix zone explicitly; `.` kept only as
+   a harmless fallback. (Reverse `in-addr.arpa.`/`ip6.arpa.` are real suffixes and worked.)
+3. **Static records clobbered.** `unbound-control local_data_remove <name>` drops EVERY
+   type at a name, so a lease-release ANY-delete on a reverse name wiped a reserved host's
+   static PTR (and DHCID writes dragged names into removes). Fix: the ANY branch bails on
+   static/reserved names; we no longer write DHCID.
+4. **Dual-stack family loss.** A forward FQDN holds A (kea-dhcp4) + AAAA (kea-dhcp6); a
+   single-family removal's name-wide cleanup wiped the other family. Fix: never honour a
+   name-wide ANY-delete on a *forward* name (the specific A/AAAA delete handles real
+   removal); reverse names (one PTR) still honour it.
+
+**Reservation-aware guard:** OPNsense rewrites `host_entries.conf` on its own cadence, so
+during a regen window a reservation isn't recognised as static. The guard now also loads
+Kea reservations from the generated dhcp4/6 configs and protects any record on a reserved
+IP from deletion (forward by rdata, reverse by the IP's PTR name) — a reservation is a
+permanent host<->IP mapping.
+
+## Test parity with v3.8 (`test_hook.sh`)
+
+The old suite (29 shell tests) targeted the run_script hook driven by Kea env-vars; the
+new suite (28 unit + 37 integration) targets native DDNS + the listener. Core behaviours
+migrated (v4/v6 lifecycle, dual-stack preserve, static guard incl. independent fwd/PTR
+#11, aggressive cleanup, idempotency #10), and the new suite adds TSIG enforcement,
+persistence, daemon respawn, static-PTR ANY-delete survival, family-safe ANY-delete, and
+the reservation guard. Two old areas are **intentionally not migrated** because the
+mechanism/feature changed, not as gaps:
+
+- **Per-Kea-hook-event parsing** (old `lease*_renew/_expire/_decline/_rebind`,
+  `committed`-with-`DELETED_LEASES`, unknown/empty hook): the run_script hook is gone;
+  Kea emits NCRs now. The behavioural equivalent (add on add-NCR, remove on delete-NCR)
+  is covered by A4/A5 + A15.
+- **Per-subnet / per-reservation DNS *domain*** (old #7): replaced by a single global
+  qualifying suffix (a locked decision above) — multi-domain-per-subnet is not supported.
+- **MAC-address fallback naming** (`device-<mac>`, old #6): Kea now generates names for
+  nameless clients (`host-<hex>` via ddns-replace-client-name / ddns-generated-prefix).
 
 ### Remaining release steps (need a push / build host)
 - Run the **official `make package`** on an OPNsense plugins tree (the test box has no
