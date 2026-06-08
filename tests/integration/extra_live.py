@@ -119,6 +119,29 @@ send("10.10.10.in-addr.arpa.", lambda u: u.delete("62.10.10.10.in-addr.arpa.")) 
 time.sleep(0.5)
 check("A13 reverse ANY-delete removes PTR", not present("62.10.10.10.in-addr.arpa."))
 
+# --- A14 reservation-aware guard: a reserved IP's records survive a DDNS delete
+#     even when NOT in host_entries.conf — closes the host_entries regeneration
+#     race. (Test Kea reserves reserved-host -> 10.10.10.50.) ---
+RIP, RPTR = "10.10.10.50", "50.10.10.10.in-addr.arpa."
+send("internal.", lambda u: u.add("reserved-host.internal.", 3600, "A", RIP))
+time.sleep(0.3)
+send("10.10.10.in-addr.arpa.", lambda u: u.add(RPTR, 3600, "PTR", "reserved-host.internal."))
+time.sleep(0.4)
+check("A14 reserved A+PTR present", present(RIP) and present(RPTR))
+send("internal.", lambda u: u.delete("reserved-host.internal.", "A", RIP))      # specific
+time.sleep(0.3)
+send("10.10.10.in-addr.arpa.", lambda u: u.delete(RPTR))                         # ANY (reverse)
+time.sleep(0.5)
+check("A14 reserved A survives delete", present(RIP))
+check("A14 reserved PTR survives delete", present(RPTR))
+send("internal.", lambda u: u.add("ephemeral.internal.", 3600, "A", "10.10.10.72"))
+time.sleep(0.3)
+send("internal.", lambda u: u.delete("ephemeral.internal.", "A", "10.10.10.72"))
+time.sleep(0.4)
+check("A14 non-reserved A still removable", not present("10.10.10.72"))
+uc("local_data_remove", "reserved-host.internal.")   # clean up test artifacts
+uc("local_data_remove", RPTR)
+
 # --- H daemon(8) respawn after a crash ---
 oldpid = int(open(PIDF).read().strip())
 os.kill(oldpid, 9)

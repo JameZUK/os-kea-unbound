@@ -9,6 +9,7 @@ for the wire protocol.
 """
 
 import ipaddress
+import json
 import re
 
 
@@ -114,6 +115,48 @@ def parse_local_data_lines(text: str):
     return out
 
 
+def _norm_ip(value):
+    """Canonical string form of an IP, or None if it isn't one."""
+    try:
+        return str(ipaddress.ip_address((value or "").strip()))
+    except (ValueError, AttributeError):
+        return None
+
+
+def reserved_ips_from_config(path: str):
+    """Set of reserved IPs (canonicalised) from a generated Kea dhcp4/6 config.
+
+    Covers global, per-subnet and shared-network reservations. Used to protect a
+    reserved host's records from DDNS deletes even before OPNsense has (re)written
+    host_entries.conf — a reservation is a permanent host<->IP mapping."""
+    out = set()
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return out
+    if "Dhcp4" in cfg:
+        root, subkey = cfg["Dhcp4"], "subnet4"
+    elif "Dhcp6" in cfg:
+        root, subkey = cfg["Dhcp6"], "subnet6"
+    else:
+        return out
+    res_lists = [root.get("reservations") or []]
+    for container in [root] + list(root.get("shared-networks") or []):
+        for sn in (container.get(subkey) or []):
+            res_lists.append(sn.get("reservations") or [])
+    for rl in res_lists:
+        for r in rl:
+            ips = list(r.get("ip-addresses") or [])
+            if r.get("ip-address"):
+                ips.append(r["ip-address"])
+            for ip in ips:
+                n = _norm_ip(ip)
+                if n:
+                    out.add(n)
+    return out
+
+
 class StaticGuard:
     """
     Records that OPNsense manages itself (Unbound Host Overrides / "Register DHCP
@@ -122,9 +165,11 @@ class StaticGuard:
     unrelated forward record, and vice versa (carried over from v3.8 issue #11).
     """
 
-    def __init__(self, host_entries_path: str):
-        self._fwd = set()   # (name, type)
-        self._ptr = set()   # ptr name
+    def __init__(self, host_entries_path: str, kea_paths=()):
+        self._fwd = set()        # (name, type) from host_entries.conf
+        self._ptr = set()        # ptr name from host_entries.conf
+        self._reserved = set()   # canonical reserved IPs (Kea reservations)
+        self._reserved_ptr = set()  # ptr names for reserved IPs
         try:
             with open(host_entries_path) as fh:
                 for rec in parse_local_data_lines(fh.read()):
@@ -134,9 +179,25 @@ class StaticGuard:
                         self._fwd.add((rec.name, rec.rtype))
         except OSError:
             pass  # no static entries / file absent
+        for path in kea_paths:
+            for ip in reserved_ips_from_config(path):
+                self._reserved.add(ip)
+                try:
+                    self._reserved_ptr.add(ptr_name(ip))
+                except ValueError:
+                    pass
 
     def is_static_forward(self, name: str, rtype: str) -> bool:
         return (fqdn(name), rtype.upper()) in self._fwd
 
     def is_static_ptr(self, ptr: str) -> bool:
         return fqdn(ptr) in self._ptr
+
+    def is_reserved_addr(self, rdata: str) -> bool:
+        """True if rdata is the IP of a Kea reservation (permanent host<->IP)."""
+        n = _norm_ip(rdata)
+        return n is not None and n in self._reserved
+
+    def is_reserved_ptr(self, ptr: str) -> bool:
+        """True if the reverse name belongs to a reserved IP."""
+        return fqdn(ptr) in self._reserved_ptr

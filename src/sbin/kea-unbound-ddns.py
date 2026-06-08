@@ -39,21 +39,29 @@ log = logging.getLogger("keaunbound")
 
 
 class StaticGuardCache:
-    """Reload host_entries.conf only when it changes."""
+    """Reload the guard (host_entries.conf static records + Kea reservations) only
+    when one of the source files changes."""
 
-    def __init__(self, path):
+    def __init__(self, path, kea_paths=()):
         self.path = path
-        self._mtime = None
-        self._guard = R.StaticGuard(path)
+        self.kea_paths = tuple(kea_paths)
+        self._sig = None
+        self._guard = R.StaticGuard(path, self.kea_paths)
+
+    def _signature(self):
+        sig = []
+        for p in (self.path,) + self.kea_paths:
+            try:
+                sig.append((p, os.path.getmtime(p)))
+            except OSError:
+                sig.append((p, None))
+        return tuple(sig)
 
     def get(self):
-        try:
-            mtime = os.path.getmtime(self.path)
-        except OSError:
-            mtime = None
-        if mtime != self._mtime:
-            self._guard = R.StaticGuard(self.path)
-            self._mtime = mtime
+        sig = self._signature()
+        if sig != self._sig:
+            self._guard = R.StaticGuard(self.path, self.kea_paths)
+            self._sig = sig
         return self._guard
 
 
@@ -65,7 +73,7 @@ class Listener:
             unbound_conf=args.unbound_conf,
             logger=lambda level, msg: getattr(log, level, log.info)(msg),
         )
-        self.guard = StaticGuardCache(args.host_entries)
+        self.guard = StaticGuardCache(args.host_entries, args.kea_conf)
         self.keyring = None
         self.keyname = None
         self.keyalgo = None
@@ -102,12 +110,15 @@ class Listener:
     def _delete(self, name, rtype, rdata):
         guard = self.guard.get()
         if rtype == "PTR":
-            if guard.is_static_ptr(name):
+            # Never delete a reverse record OPNsense owns statically, nor one for
+            # a reserved IP (permanent mapping — guards the host_entries.conf
+            # regeneration race where a reservation isn't in that file yet).
+            if guard.is_static_ptr(name) or guard.is_reserved_ptr(name):
                 return
             self.zone.remove(name, "PTR", rdata)
             return
         if rtype in ("A", "AAAA"):
-            if guard.is_static_forward(name, rtype):
+            if guard.is_static_forward(name, rtype) or (rdata and guard.is_reserved_addr(rdata)):
                 return
             self.zone.remove(name, rtype, rdata)
         elif rtype == "ANY":
@@ -123,7 +134,8 @@ class Listener:
             #    A REVERSE name holds a single PTR, so the blanket delete is safe.
             if (guard.is_static_forward(name, "A")
                     or guard.is_static_forward(name, "AAAA")
-                    or guard.is_static_ptr(name)):
+                    or guard.is_static_ptr(name)
+                    or guard.is_reserved_ptr(name)):
                 return
             if R.is_reverse_name(name):
                 self.zone.remove(name)
@@ -203,6 +215,11 @@ def parse_args(argv):
     p.add_argument("--unbound-conf", default="/var/unbound/unbound.conf")
     p.add_argument("--host-entries", default="/var/unbound/host_entries.conf")
     p.add_argument("--include-file", default="/usr/local/etc/unbound.opnsense.d/keaunbound.conf")
+    p.add_argument("--kea-conf", action="append",
+                   default=["/usr/local/etc/kea/kea-dhcp4.conf",
+                            "/usr/local/etc/kea/kea-dhcp6.conf"],
+                   help="Kea generated config(s) to read reservations from "
+                        "(protect reserved hosts' records from deletion)")
     p.add_argument("--tsig-name", default="keaunbound")
     p.add_argument("--tsig-secret", default="")
     p.add_argument("--tsig-algorithm", default="hmac-sha256")
