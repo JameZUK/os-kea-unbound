@@ -82,7 +82,15 @@ class StatusController extends ApiControllerBase
      */
     public function logAction()
     {
-        $count = (int)$this->request->get('count', null, 200);
+        // accept count from the query string or a JSON POST body (the Status page
+        // posts it via ajaxCall, which sends an application/json body).
+        $count = (int)$this->request->get('count', null, 0);
+        if ($count < 1) {
+            $body = $this->request->getJsonRawBody(true);
+            if (is_array($body) && isset($body['count'])) {
+                $count = (int)$body['count'];
+            }
+        }
         if ($count < 1) {
             $count = 200;
         }
