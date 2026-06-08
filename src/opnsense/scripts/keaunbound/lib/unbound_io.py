@@ -31,11 +31,14 @@ from . import records as rec_mod
 
 
 def default_runner(unbound_conf):
-    """Return a runner(args_list) -> (rc, output) bound to a config file."""
-    def _run(args):
+    """Return a runner(args_list, input=None) -> (rc, output) bound to a config file.
+
+    `input` feeds stdin, used for the batched `local_datas`/`local_datas_remove`
+    commands (one process for many records instead of one per record)."""
+    def _run(args, input=None):
         cmd = ["unbound-control", "-c", unbound_conf] + list(args)
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            out = subprocess.run(cmd, input=input, capture_output=True, text=True, timeout=15)
             return out.returncode, (out.stdout + out.stderr)
         except Exception as exc:  # noqa: BLE001 - best effort, runtime is non-fatal
             return 1, str(exc)
@@ -85,15 +88,21 @@ class UnboundZone:
         return [r for r in self._records if r.name == name]
 
     def _reconcile_runtime(self, name):
-        """Remove the name from the running zone, then re-add all current records."""
+        """Remove the name from the running zone, then re-add all current records.
+
+        Uses one `local_data_remove` + one batched `local_datas` (records on
+        stdin) so a name is reconciled with at most two unbound-control spawns,
+        regardless of how many records it has."""
         name = rec_mod.fqdn(name)
         rc, out = self.runner(["local_data_remove", name])
         if rc != 0:
             self.logger("error", "local_data_remove %s failed: %s" % (name, out.strip()))
-        for r in self._records_for(name):
-            rc, out = self.runner(["local_data"] + r.control_args())
+        recs = self._records_for(name)
+        if recs:
+            data = "".join(r.control_args()[0] + "\n" for r in recs)
+            rc, out = self.runner(["local_datas"], input=data)
             if rc != 0:
-                self.logger("error", "local_data %s failed: %s" % (r.control_args()[0], out.strip()))
+                self.logger("error", "local_datas for %s failed: %s" % (name, out.strip()))
 
     # ---- public API -------------------------------------------------------
     def add(self, record):

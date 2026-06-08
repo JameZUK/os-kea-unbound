@@ -161,6 +161,18 @@ class Listener:
             log.warning("Dropped unsigned UPDATE from %s (TSIG required)", addr)
             return
 
+        # Acknowledge FIRST, then apply. We don't do RFC 2136 prerequisite-based
+        # conflict resolution (we own the zone) and always reply NOERROR, so there
+        # is nothing to learn from doing the work before replying — and replying
+        # up front keeps kea-dhcp-ddns from timing out (DHCP_DDNS_*_TIMEOUT) while
+        # the listener does file/unbound-control I/O under a burst.
+        try:
+            resp = dns.message.make_response(msg)
+            resp.set_rcode(dns.rcode.NOERROR)
+            sock.sendto(resp.to_wire(), addr)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to send response to %s: %s", addr, exc)
+
         # RFC 2136 operation is carried in each RRset's `.deleting` (dnspython):
         #   None -> add; NONE -> delete a specific RR; ANY -> delete an RRset / all.
         for rrset in msg.authority:
@@ -175,18 +187,16 @@ class Listener:
                 for rdata in rrset:
                     self._delete(name, rtype, rdata.to_text())
 
-        # Acknowledge so kea-dhcp-ddns considers the update done.
-        try:
-            resp = dns.message.make_response(msg)
-            resp.set_rcode(dns.rcode.NOERROR)
-            sock.sendto(resp.to_wire(), addr)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to send response to %s: %s", addr, exc)
-
     # ---- main loop --------------------------------------------------------
     def serve(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Absorb bursts: kea-dhcp-ddns can fire many NCRs back-to-back while we
+        # apply the previous one, so widen the receive buffer to avoid drops.
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError:
+            pass
         sock.bind((self.args.bind, self.args.port))
         sock.settimeout(1.0)
         log.info("Listening on %s:%d (tsig=%s)", self.args.bind, self.args.port,
