@@ -61,22 +61,10 @@ class ServiceController extends ApiMutableServiceControllerBase
             $backend->configdRun('kea restart');
             $backend->configdRun('keaunbound restart');
         } else {
-            // Disable: revert Kea's DDNS only if we were the one who enabled it,
-            // then regenerate Kea (our injector self-disables, leaving a clean
-            // config) and stop our listener.
-            if ((string)$gen->general->manage_kea_ddns === '1') {
-                $kdns = new \OPNsense\Kea\KeaDdns();
-                $kdns->general->enabled = '0';
-                $kdns->serializeToConfig();
-                $gen->general->manage_kea_ddns = '0';
-                $gen->serializeToConfig();
-                Config::getInstance()->save();
-                syslog(LOG_NOTICE, 'os-kea-unbound: reverted Kea DDNS to disabled (was ' .
-                    'enabled by this plugin)');
-                $backend->configdRun('template reload OPNsense/Kea');
-                $backend->configdRun('kea restart');
-            }
-            $backend->configdRun('keaunbound stop');
+            // Disable: run the shared teardown — reverts Kea DDNS (only if we own
+            // it), stops the listener, flushes our records, and cleans the Kea
+            // config. Same routine used by the package pre-deinstall.
+            $backend->configdRun('keaunbound teardown');
         }
         return ['status' => 'ok'];
     }

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs on `pkg delete` (pkg skips deinstall scripts on upgrade). Reverts every
+# change this plugin made while our files are still present: stops the listener,
+# reverts Kea's DDNS daemon (only if we enabled it), flushes our records from
+# Unbound + removes the include file, and regenerates a clean Kea config.
+#
+# The recommended flow is still to DISABLE the plugin in the GUI first (which runs
+# the same teardown); this is the safety net for a delete-while-enabled.
+if [ -f /usr/local/opnsense/scripts/keaunbound/teardown.php ]; then
+    /usr/local/bin/php /usr/local/opnsense/scripts/keaunbound/teardown.php || true
+fi

@@ -103,7 +103,7 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **4.5 — config safety** (record-before-mutate + revert, non-destructive D2 merge, atomic, alerts)
 - [x] **5 — static sync** (seed existing leases + reservations; control socket primary, CSV fallback, NO KCA needed) — verified on the test box
 - [x] **6 — Status page** (Services → Kea Unbound DDNS → Status: listener health, record count, TSIG, Kea-DDNS ownership, recent log, "Sync now") — data verified on the test box
-- [ ] **7 — Disable/uninstall cleanliness**
+- [x] **7 — clean uninstall/teardown** (shared teardown.php: revert Kea DDNS iff owned, stop listener, flush records + remove include file, regenerate clean Kea; wired to the disable path AND a +PRE_DEINSTALL) — verified on the test box
 - [ ] **8 — Audit/clean + logs + docs**
 - [ ] **9 — Tests + release (tag 0.1)**
 
@@ -143,6 +143,12 @@ tests/
   enable required. Reservations are read from the generated kea-dhcp{4,6}.conf (global +
   per-subnet). Memfile CSV (`/var/db/kea/kea-leases{4,6}.csv`) is the fallback. Run by
   `configctl keaunbound sync` and by start.py after the listener launches.
+- **Teardown (7):** one routine (`teardown.php`, configd action `keaunbound teardown`) used by
+  both the disable path and the package `+PRE_DEINSTALL`. plugins.mk picks up lifecycle scripts
+  (`+PRE_INSTALL/+POST_INSTALL/+PRE_DEINSTALL/+POST_DEINSTALL`) from the **plugin root** (not
+  src/); modern pkg runs `+PRE_DEINSTALL` on real deletion, not upgrades. Recommended uninstall
+  flow is still "disable in the GUI first" (same teardown runs). The `+PRE_DEINSTALL` pkg-time
+  behaviour will be re-confirmed at Phase 9 packaging (can't build a pkg without the plugins tree).
 - **Config safety (4.5):** the only persistent setting we change is `Kea/ddns/general/enabled`
   (0→1). We mark `manage_kea_ddns` when WE enable it, revert on disable only if we own it, and
   never take ownership if the user already had it on. The generated-config edits are atomic
