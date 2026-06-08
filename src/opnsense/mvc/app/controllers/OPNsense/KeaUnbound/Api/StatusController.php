@@ -47,13 +47,6 @@ class StatusController extends ApiControllerBase
             }
         }
 
-        // recent log lines
-        $recent = [];
-        if (is_file(self::LOGFILE)) {
-            $lines = @file(self::LOGFILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
-            $recent = array_slice($lines, -12);
-        }
-
         $tsig = (string)$general->general->tsig_enabled === '1'
             ? (string)$general->general->tsig_algorithm : 'off';
 
@@ -79,7 +72,39 @@ class StatusController extends ApiControllerBase
             'qualifying_suffix_is_default' => $suffixIsDefault,
             'kea_ddns_enabled' => (string)$kdns->general->enabled,
             'kea_ddns_managed' => (string)$general->general->manage_kea_ddns,
-            'recent_log' => $recent,
+        ];
+    }
+
+    /**
+     * Recent activity for the Status page. Returns the last `count` log lines
+     * (default 200, capped 20000), spanning rotated archives via the `log`
+     * configd action so the UI can progressively "load more" history.
+     */
+    public function logAction()
+    {
+        $count = (int)$this->request->get('count', null, 200);
+        if ($count < 1) {
+            $count = 200;
+        }
+        if ($count > 20000) {
+            $count = 20000;
+        }
+        $lines = [];
+        try {
+            $out = (string)(new Backend())->configdpRun('keaunbound log', [(string)$count]);
+            $out = rtrim($out, "\n");
+            if ($out !== '') {
+                $lines = explode("\n", $out);
+            }
+        } catch (\Exception $e) {
+            $lines = [];
+        }
+        return [
+            'lines' => $lines,
+            'returned' => count($lines),
+            'requested' => $count,
+            // if we got as many as asked for, older history likely remains
+            'more' => count($lines) >= $count,
         ];
     }
 }

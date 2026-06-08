@@ -25,12 +25,35 @@
             var owned = data.kea_ddns_managed === "1" ? " (managed by this plugin)" : " (pre-existing)";
             $("#st_kea_ddns").html(fmtBool(data.kea_ddns_enabled === "1") +
                 ' <small class="text-muted">' + owned + '</small>');
-            $("#st_log").text((data.recent_log || []).join("\n"));
+        });
+    }
+
+    var logCount = 200;             // lines currently requested
+    var logStep = 500;             // how many more "Load more" pulls
+    var logMax = 20000;            // hard cap (matches backend)
+    function refreshLog() {
+        ajaxGet("/api/keaunbound/status/log", {count: logCount}, function (data, status) {
+            if (!data || data.status === 'failed') { return; }
+            var lines = data.lines || [];
+            var el = document.getElementById("st_log");
+            // keep the view pinned to the bottom (live tail) only if the user is
+            // already there — don't yank them down while reading older lines.
+            var atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 40;
+            $(el).text(lines.length ? lines.join("\n") : "(no activity logged yet)");
+            if (atBottom) { el.scrollTop = el.scrollHeight; }
+            $("#st_log_info").text(lines.length + " line" + (lines.length === 1 ? "" : "s") +
+                " shown" + (data.more ? " — more available" : ""));
+            $("#logMore").prop("disabled", !data.more || logCount >= logMax);
         });
     }
     $(document).ready(function () {
         refreshStatus();
-        setInterval(refreshStatus, 5000);
+        refreshLog();
+        setInterval(function () { refreshStatus(); refreshLog(); }, 5000);
+        $("#logMore").click(function () {
+            logCount = Math.min(logCount + logStep, logMax);
+            refreshLog();
+        });
         $("#syncAct").click(function () {
             $("#syncAct_progress").addClass("fa fa-spinner fa-pulse");
             ajaxCall("/api/keaunbound/service/sync", {}, function (data, status) {
@@ -66,5 +89,14 @@
 
 <div class="content-box" style="margin-top:1em; padding:1em;">
     <strong>{{ lang._('Recent activity') }}</strong>
-    <pre id="st_log" style="margin-top:0.5em; max-height:320px; overflow:auto;">-</pre>
+    <span id="st_log_info" class="text-muted" style="margin-left:0.5em;"></span>
+    <pre id="st_log" style="margin-top:0.5em; max-height:480px; overflow:auto;">-</pre>
+    <div style="margin-top:0.5em;">
+        <button class="btn btn-default btn-xs" id="logMore" type="button">
+            <i class="fa fa-angle-double-up"></i> {{ lang._('Load more') }}
+        </button>
+        <span class="text-muted" style="margin-left:0.5em;">
+            {{ lang._('Loads older entries, including rotated log archives.') }}
+        </span>
+    </div>
 </div>
