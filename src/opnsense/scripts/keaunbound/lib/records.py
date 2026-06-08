@@ -25,6 +25,21 @@ def rrtype_for_ip(ip: str) -> str:
     return "AAAA" if ipaddress.ip_address(ip).version == 6 else "A"
 
 
+def host_fqdn(hostname: str, suffix: str) -> str:
+    """
+    Build an absolute FQDN from a (possibly bare) DHCP hostname and a qualifying
+    suffix, used by the static-sync path (the DDNS path gets ready-made FQDNs from
+    Kea). Takes the first label, lowercases it, strips invalid chars, appends the
+    suffix. Returns "" if there is no usable label.
+    """
+    label = (hostname or "").strip().lower().split(".")[0]
+    label = "".join(c for c in label if c.isalnum() or c == "-")
+    if not label:
+        return ""
+    suffix = (suffix or "").strip().strip(".")
+    return fqdn(label + "." + suffix) if suffix else fqdn(label)
+
+
 def ptr_name(ip: str) -> str:
     """Reverse-pointer name (absolute) for an IPv4 or IPv6 address."""
     return ipaddress.ip_address(ip).reverse_pointer + "."

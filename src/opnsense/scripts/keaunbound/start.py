@@ -81,6 +81,11 @@ def main():
            "-p", PIDFILE, "-P", SUPERVISOR_PID,
            "/usr/local/bin/python3"] + args
     subprocess.run(cmd, check=False)
+    # Seed existing leases/reservations so DNS is populated immediately rather than
+    # waiting for the next DDNS event. Best-effort; never blocks the listener start.
+    sync = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lease-sync.py")
+    if os.path.exists(sync):
+        subprocess.run(["/usr/local/bin/python3", sync], check=False)
     return 0
 
 

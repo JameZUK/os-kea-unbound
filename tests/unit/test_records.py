@@ -17,6 +17,14 @@ def test_ptr_name_v4_v6():
     assert R.ptr_name("2001:db8::1").endswith(".ip6.arpa.")
 
 
+def test_host_fqdn():
+    assert R.host_fqdn("Laptop", "home.lan") == "laptop.home.lan."
+    assert R.host_fqdn("host.sub.example", "home.lan") == "host.home.lan."  # first label + suffix
+    assert R.host_fqdn("we!rd_chars", "home.lan") == "werdchars.home.lan."
+    assert R.host_fqdn("", "home.lan") == ""
+    assert R.host_fqdn("x", "") == "x."
+
+
 def test_is_reverse_name():
     assert R.is_reverse_name("10.1.168.192.in-addr.arpa")
     assert R.is_reverse_name(R.ptr_name("2001:db8::1"))

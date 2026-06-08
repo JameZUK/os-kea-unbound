@@ -101,7 +101,7 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **3 — Service wiring** (configd actions, start/stop, daemon(8) supervision, service registration)
 - [x] **4 — kea_sync injector + D2 auto-enable** (verified end-to-end on the test box)
 - [x] **4.5 — config safety** (record-before-mutate + revert, non-destructive D2 merge, atomic, alerts)
-- [ ] **5 — KCA static sync** (seed from existing leases/reservations)
+- [x] **5 — static sync** (seed existing leases + reservations; control socket primary, CSV fallback, NO KCA needed) — verified on the test box
 - [ ] **6 — Status page + helper**
 - [ ] **7 — Disable/uninstall cleanliness**
 - [ ] **8 — Audit/clean + logs + docs**
@@ -138,6 +138,11 @@ tests/
 - **Per-subnet override gotcha:** OPNsense emits per-subnet `ddns-send-updates: false` which
   overrides our global `true` (Kea: subnet beats global). The injector strips that false so
   subnets inherit the global value. It does NOT touch explicit per-subnet `true`.
+- **Static sync (5):** `lease_cmds` is loaded by default, so `lease4/6-get-all` works on the
+  per-daemon unix control socket (`/var/run/kea/kea{4,6}-ctrl-socket`) — no KCA/control-agent
+  enable required. Reservations are read from the generated kea-dhcp{4,6}.conf (global +
+  per-subnet). Memfile CSV (`/var/db/kea/kea-leases{4,6}.csv`) is the fallback. Run by
+  `configctl keaunbound sync` and by start.py after the listener launches.
 - **Config safety (4.5):** the only persistent setting we change is `Kea/ddns/general/enabled`
   (0→1). We mark `manage_kea_ddns` when WE enable it, revert on disable only if we own it, and
   never take ownership if the user already had it on. The generated-config edits are atomic
