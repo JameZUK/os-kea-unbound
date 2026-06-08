@@ -134,18 +134,36 @@ def kea_reachable():
     return os.path.exists(CSV4) or os.path.exists(CSV6)
 
 
+def reserved_ips():
+    """Canonical set of all Kea-reserved IPs (v4 + v6)."""
+    s = set()
+    for path in (KEA4, KEA6):
+        s |= R.reserved_ips_from_config(path)
+    return s
+
+
 def desired_records(suffix):
-    """The forward A/AAAA + PTR records Kea currently implies (reservations + leases)."""
-    pairs = (reservations(KEA4, "4") + reservations(KEA6, "6")
-             + leases("4") + leases("6"))
+    """Forward A/AAAA + PTR for the *dynamic* leases Kea currently holds.
+
+    DYNAMIC ONLY: reservations (and manual Host Overrides) are registered in DNS
+    by OPNsense itself (host_entries.conf, forward + reverse). This plugin exists
+    solely to add dynamic-lease DNS — which Kea + Unbound do not do natively — so
+    we skip any lease whose address is a reservation and never touch an
+    OPNsense-owned static name. Each dynamic lease still gets BOTH the forward
+    (A/AAAA) and the reverse (PTR) record."""
+    resv = reserved_ips()
     recs = []
-    for host, ip in pairs:
-        try:
-            name = R.host_fqdn(host, suffix)
-            if not name:
+    for fam in ("4", "6"):
+        for host, ip in leases(fam):
+            n = R._norm_ip(ip)
+            if n is None or n in resv:
+                continue  # reservation -> OPNsense's, not ours
+            try:
+                name = R.host_fqdn(host, suffix)
+                if not name:
+                    continue
+                recs.append(R.Record(name, 3600, R.rrtype_for_ip(ip), ip))
+                recs.append(R.Record(R.ptr_name(ip), 3600, "PTR", name))
+            except (ValueError, KeyError):
                 continue
-            recs.append(R.Record(name, 3600, R.rrtype_for_ip(ip), ip))
-            recs.append(R.Record(R.ptr_name(ip), 3600, "PTR", name))
-        except (ValueError, KeyError):
-            continue
     return recs

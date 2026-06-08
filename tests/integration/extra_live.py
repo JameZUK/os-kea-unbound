@@ -119,14 +119,13 @@ send("10.10.10.in-addr.arpa.", lambda u: u.delete("62.10.10.10.in-addr.arpa.")) 
 time.sleep(0.5)
 check("A13 reverse ANY-delete removes PTR", not present("62.10.10.10.in-addr.arpa."))
 
-# --- A14 reservation-aware guard: a reserved IP's records survive a DDNS delete
-#     even when NOT in host_entries.conf — closes the host_entries regeneration
-#     race. (Test Kea reserves reserved-host -> 10.10.10.50.) ---
+# --- A14 reserved-record protection: a reserved host's record placed by OPNsense
+#     (runtime, as host_entries would) must SURVIVE a DDNS delete — the listener
+#     must never evict it. (Test Kea reserves reserved-host -> 10.10.10.50.) ---
 RIP, RPTR = "10.10.10.50", "50.10.10.10.in-addr.arpa."
-send("internal.", lambda u: u.add("reserved-host.internal.", 3600, "A", RIP))
+uc("local_data", "reserved-host.internal. 3600 IN A " + RIP)            # OPNsense's record
+uc("local_data", "%s 3600 IN PTR reserved-host.internal." % RPTR)
 time.sleep(0.3)
-send("10.10.10.in-addr.arpa.", lambda u: u.add(RPTR, 3600, "PTR", "reserved-host.internal."))
-time.sleep(0.4)
 check("A14 reserved A+PTR present", present(RIP) and present(RPTR))
 send("internal.", lambda u: u.delete("reserved-host.internal.", "A", RIP))      # specific
 time.sleep(0.3)
@@ -134,6 +133,9 @@ send("10.10.10.in-addr.arpa.", lambda u: u.delete(RPTR))                        
 time.sleep(0.5)
 check("A14 reserved A survives delete", present(RIP))
 check("A14 reserved PTR survives delete", present(RPTR))
+uc("local_data_remove", "reserved-host.internal.")
+uc("local_data_remove", RPTR)
+# a non-reserved record is still removable by a DDNS delete
 send("internal.", lambda u: u.add("ephemeral.internal.", 3600, "A", "10.10.10.72"))
 time.sleep(0.3)
 send("internal.", lambda u: u.delete("ephemeral.internal.", "A", "10.10.10.72"))
@@ -186,6 +188,17 @@ time.sleep(0.4)
 check("A17 v6->v4 order: AAAA removed, A preserved",
       present("10.10.10.84") and not present("2001:db8::84"))
 uc("local_data_remove", "v6first.internal.")
+
+# --- A18 dynamic-only: a DDNS add for a RESERVED host is skipped (its DNS is
+#     OPNsense's); a dynamic (non-reserved) host is registered. Test Kea
+#     reserves reserved-host -> 10.10.10.50. ---
+send("internal.", lambda u: u.add("reserved-host.internal.", 1800, "A", "10.10.10.50"))
+time.sleep(0.4)
+check("A18 reserved host NOT registered by plugin", not in_file("reserved-host"))
+send("internal.", lambda u: u.add("dynhost.internal.", 1800, "A", "10.10.10.66"))
+time.sleep(0.4)
+check("A18 dynamic host IS registered (fwd)", present("10.10.10.66") and in_file("dynhost"))
+uc("local_data_remove", "dynhost.internal.")
 
 # --- H daemon(8) respawn after a crash ---
 oldpid = int(open(PIDF).read().strip())

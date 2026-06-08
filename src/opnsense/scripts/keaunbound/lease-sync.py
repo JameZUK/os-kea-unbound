@@ -46,15 +46,19 @@ def main():
         return 0
     zone = UnboundZone(include_file=INCLUDE_FILE, unbound_conf=UNBOUND_CONF,
                        logger=lambda level, msg: None)
-    guard = R.StaticGuard(HOST_ENTRIES)
+    # Guard on host_entries.conf AND Kea reservations so we never seed (or later
+    # touch) an OPNsense-owned static/reserved name. desired_records is already
+    # dynamic-only; this is defence in depth for the host_entries case.
+    guard = R.StaticGuard(HOST_ENTRIES, [kea_source.KEA4, kea_source.KEA6])
     count = 0
     for rec in kea_source.desired_records(settings["suffix"]):
         if rec.rtype == "PTR":
-            if not guard.is_static_ptr(rec.name):
-                zone.add(rec)
-        elif not guard.is_static_forward(rec.name, rec.rtype):
-            zone.add(rec)
-        count += 1
+            if guard.is_static_ptr(rec.name) or guard.is_reserved_ptr(rec.name):
+                continue
+        elif guard.is_static_forward(rec.name, rec.rtype) or guard.is_reserved_addr(rec.rdata):
+            continue
+        if zone.add(rec):
+            count += 1
     log("registered %d records" % count)
     print("keaunbound: lease-sync registered %d records" % count)
     return 0

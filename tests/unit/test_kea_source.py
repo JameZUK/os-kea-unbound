@@ -42,19 +42,24 @@ def test_leases_csv_filters_expired_and_state(tmp_path):
     assert "10.0.0.51" not in addrs and "10.0.0.52" not in addrs
 
 
-def test_desired_records(tmp_path, monkeypatch):
-    monkeypatch.setattr(kea_source, "reservations",
-                        lambda p, f: [("host", "10.0.0.5")] if f == "4" else [])
-    monkeypatch.setattr(kea_source, "leases", lambda f: [])
+def test_desired_records_dynamic_only(monkeypatch):
+    # DYNAMIC ONLY: a dynamic lease gets forward + PTR; a lease on a RESERVED ip
+    # is skipped (reservations are OPNsense's), and reservations alone produce
+    # nothing (this plugin never registers them).
+    monkeypatch.setattr(kea_source, "reserved_ips", lambda: {"10.0.0.9"})
+    monkeypatch.setattr(kea_source, "leases",
+                        lambda f: [("dyn", "10.0.0.5"), ("resv", "10.0.0.9")] if f == "4" else [])
     lines = [r.local_data_line() for r in kea_source.desired_records("home.lan")]
-    assert any('host.home.lan. 3600 IN A 10.0.0.5' in ln for ln in lines)
-    assert any('IN PTR host.home.lan.' in ln for ln in lines)
+    assert any('dyn.home.lan. 3600 IN A 10.0.0.5' in ln for ln in lines)         # forward
+    assert any('5.0.0.10.in-addr.arpa. 3600 IN PTR dyn.home.lan.' in ln for ln in lines)  # reverse
+    assert not any('10.0.0.9' in ln for ln in lines)   # reserved-ip lease skipped
+    assert not any('resv' in ln for ln in lines)
 
 
 def test_stale_detection_set_diff(monkeypatch):
-    monkeypatch.setattr(kea_source, "reservations",
-                        lambda p, f: [("keep", "10.0.0.5")] if f == "4" else [])
-    monkeypatch.setattr(kea_source, "leases", lambda f: [])
+    monkeypatch.setattr(kea_source, "reserved_ips", lambda: set())
+    monkeypatch.setattr(kea_source, "leases",
+                        lambda f: [("keep", "10.0.0.5")] if f == "4" else [])
     desired = {r.key() for r in kea_source.desired_records("home.lan")}
     actual = R.parse_local_data_lines(
         'local-data: "keep.home.lan. 3600 IN A 10.0.0.5"\n'

@@ -24,6 +24,7 @@ from lib.unbound_io import UnboundZone  # noqa: E402
 
 INCLUDE_FILE = "/usr/local/etc/unbound.opnsense.d/keaunbound.conf"
 UNBOUND_CONF = "/var/unbound/unbound.conf"
+HOST_ENTRIES = "/var/unbound/host_entries.conf"
 LOG = "/var/log/keaunbound/keaunbound.log"
 
 
@@ -53,10 +54,31 @@ def main():
         print("keaunbound: clean — nothing to do (no include file)")
         return 0
     desired_keys = {r.key() for r in kea_source.desired_records(settings["suffix"])}
-    stale = [r for r in actual if r.key() not in desired_keys]
+    # Never prune a name OPNsense owns (manual Host Override or Kea reservation).
+    # Those are static, not ours; removing one local_data_remove's the whole name
+    # and evicts OPNsense's record from Unbound's runtime (this broke hostname
+    # firewall aliases once). We only ever prune our own dynamic records.
+    guard = R.StaticGuard(HOST_ENTRIES, [kea_source.KEA4, kea_source.KEA6])
+
+    def owned(r):
+        if r.rtype == "PTR":
+            return guard.is_static_ptr(r.name) or guard.is_reserved_ptr(r.name)
+        return guard.is_static_forward(r.name, r.rtype) or guard.is_reserved_addr(r.rdata)
+
+    stale = [r for r in actual if r.key() not in desired_keys and not owned(r)]
     if not stale:
         print("keaunbound: clean — no stale records")
         return 0
+    # Anomaly guard: a steady-state clean prunes a handful. A huge prune means the
+    # desired set was probably partial (e.g. the control socket answered while Kea
+    # was reloading), so refuse rather than mass-evict still-valid records.
+    limit = max(20, len(actual) // 2)
+    if len(stale) > limit:
+        msg = ("clean aborted — %d of %d records would be pruned (> limit %d); "
+               "desired set looks partial, refusing to prune" % (len(stale), len(actual), limit))
+        log(msg)
+        print("keaunbound: " + msg)
+        return 1
     zone = UnboundZone(include_file=INCLUDE_FILE, unbound_conf=UNBOUND_CONF,
                        logger=lambda level, msg: None)
     for r in stale:

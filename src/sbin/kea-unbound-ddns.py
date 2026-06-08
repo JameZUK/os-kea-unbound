@@ -88,8 +88,11 @@ class Listener:
     def _add(self, name, ttl, rtype, rdata):
         guard = self.guard.get()
         if rtype == "PTR":
-            if guard.is_static_ptr(name):
-                log.info("Skipped PTR add for %s (static)", name)
+            # Reservations + Host Overrides are OPNsense's (forward + reverse).
+            # We register dynamic leases only, so never write — and thus never
+            # later evict — a reserved or statically-owned reverse name.
+            if guard.is_static_ptr(name) or guard.is_reserved_ptr(name):
+                log.info("Skipped PTR add for %s (static/reserved)", name)
                 return
             self.zone.add(R.Record(name, ttl, "PTR", rdata))
             return
@@ -100,8 +103,8 @@ class Listener:
             # a co-located static record (it shares the name).
             return
         # forward A/AAAA
-        if guard.is_static_forward(name, rtype):
-            log.info("Skipped %s add for %s (static)", rtype, name)
+        if guard.is_static_forward(name, rtype) or guard.is_reserved_addr(rdata):
+            log.info("Skipped %s add for %s (static/reserved)", rtype, name)
             return
         if self.args.aggressive_cleanup:
             self.zone.remove_other_addresses(name, rtype, rdata)
