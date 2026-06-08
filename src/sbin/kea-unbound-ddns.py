@@ -85,6 +85,12 @@ class Listener:
                 return
             self.zone.add(R.Record(name, ttl, "PTR", rdata))
             return
+        if rtype not in ("A", "AAAA"):
+            # Ignore DHCID and any other auxiliary RRs Kea includes. We own the
+            # zone in Unbound and only publish address + pointer records; writing
+            # a DHCID at a name later drags it into a blanket remove that can wipe
+            # a co-located static record (it shares the name).
+            return
         # forward A/AAAA
         if guard.is_static_forward(name, rtype):
             log.info("Skipped %s add for %s (static)", rtype, name)
@@ -105,9 +111,15 @@ class Listener:
                 return
             self.zone.remove(name, rtype, rdata)
         elif rtype == "ANY":
-            # delete all our records for the name (forward case)
-            if not guard.is_static_forward(name, "A") and not guard.is_static_forward(name, "AAAA"):
-                self.zone.remove(name)
+            # Blanket delete of every RRset at the name. unbound-control
+            # local_data_remove drops ALL types at the name, so NEVER touch a name
+            # that holds a static OPNsense record — forward OR reverse — or we wipe
+            # its static A/AAAA/PTR (this clobbered reserved hosts' reverse PTRs).
+            if (guard.is_static_forward(name, "A")
+                    or guard.is_static_forward(name, "AAAA")
+                    or guard.is_static_ptr(name)):
+                return
+            self.zone.remove(name)
 
     # ---- packet handling --------------------------------------------------
     def handle(self, data, addr, sock):

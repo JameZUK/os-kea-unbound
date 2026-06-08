@@ -63,6 +63,35 @@ check("A8 static guard: DDNS IP not applied", not present("10.10.10.99"))
 check("A8 static guard: not added to our file", not in_file("guard-host"))
 open(HE, "w").write(orig)  # restore
 
+# --- A10/A11 static PTR must survive a DDNS ANY-delete, both v4 and v6.
+#     Regression: a lease release sends "delete all RRsets at <reverse name>";
+#     local_data_remove drops the WHOLE name, which wiped the reserved host's
+#     static PTR loaded from host_entries.conf. Also: DHCID must not be written. ---
+import ipaddress  # noqa: E402
+for tag, ip, fqdn in [
+    ("A10 v4", "10.10.10.242", "static-rev4.internal."),
+    ("A11 v6", "2001:db8::242", "static-rev6.internal."),
+]:
+    ptr = ipaddress.ip_address(ip).reverse_pointer + "."
+    orig_he = open(HE).read() if os.path.exists(HE) else ""
+    with open(HE, "a") as f:
+        f.write('\nlocal-data-ptr: "%s %s"\n' % (ip, fqdn.rstrip(".")))
+    uc("local_data", "%s 3600 IN PTR %s" % (ptr, fqdn))   # as an unbound (re)load would
+    time.sleep(0.3)
+    # DDNS for the reserved host: ADD PTR (+DHCID), then a lease-release ANY-delete.
+    send(ptr, lambda u, p=ptr, fq=fqdn: u.add(p, 1333, "PTR", fq))
+    try:
+        send(ptr, lambda u, p=ptr: u.add(p, 1333, "DHCID", "AAABBBCCCDDDEEE="))
+    except Exception:
+        pass
+    time.sleep(0.3)
+    send(ptr, lambda u, p=ptr: u.delete(p))   # ANY-delete the whole name
+    time.sleep(0.5)
+    check(tag + " static PTR survives ANY-delete", present(fqdn))
+    check(tag + " DHCID not written", not present("DHCID"))
+    uc("local_data_remove", ptr)
+    open(HE, "w").write(orig_he)
+
 # --- H daemon(8) respawn after a crash ---
 oldpid = int(open(PIDF).read().strip())
 os.kill(oldpid, 9)
