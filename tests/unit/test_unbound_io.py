@@ -80,3 +80,35 @@ def test_persistence_reload(tmp_path):
     # a fresh zone object loads the same records from the include file
     zone2, _, _ = make_zone(tmp_path)
     assert len(zone2._records_for("host.example.com")) == 1
+
+
+def test_write_file_is_world_readable(tmp_path):
+    # mkstemp creates 0600; the include file must stay readable (Unbound copies it
+    # into the chroot). New files default to 0644.
+    zone, runner, inc = make_zone(tmp_path)
+    zone.add(R.Record("host.example.com", 3600, "A", "192.168.1.10"))
+    import os
+    assert (os.stat(str(inc)).st_mode & 0o077) == 0o044 or (os.stat(str(inc)).st_mode & 0o004)
+
+
+def test_prune_removes_stale_only(tmp_path):
+    zone, runner, inc = make_zone(tmp_path)
+    zone.add(R.Record("keep.example.com", 3600, "A", "10.0.0.5"))
+    zone.add(R.Record("stale.example.com", 3600, "A", "10.0.0.9"))
+    desired = {("keep.example.com.", "A", "10.0.0.5")}
+    removed, aborted = zone.prune(lambda r: r.key() not in desired)
+    assert not aborted
+    assert [r.rdata for r in removed] == ["10.0.0.9"]
+    text = inc.read_text()
+    assert "keep.example.com" in text and "stale.example.com" not in text
+
+
+def test_prune_abort_if_vetoes(tmp_path):
+    zone, runner, inc = make_zone(tmp_path)
+    for i in range(5):
+        zone.add(R.Record("h%d.example.com" % i, 3600, "A", "10.0.0.%d" % i))
+    before = inc.read_text()
+    # veto: too many would be pruned -> nothing changes
+    removed, aborted = zone.prune(lambda r: True, abort_if=lambda actual, rem: len(rem) > 2)
+    assert aborted and len(removed) == 5
+    assert inc.read_text() == before          # file untouched

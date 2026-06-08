@@ -5,12 +5,12 @@ TSIG helpers. Isolates the dnspython dependency so the rest of lib/ stays
 import-clean for off-box unit testing.
 """
 
-# Map our stored algorithm strings to dnspython algorithm names.
+# Map our stored algorithm strings to dnspython algorithm names. Only the strong
+# HMACs the GUI offers are accepted; hmac-md5 is intentionally not supported.
 _ALGO_MAP = {
     "hmac-sha256": "hmac-sha256",
     "hmac-sha512": "hmac-sha512",
     "hmac-sha1": "hmac-sha1",
-    "hmac-md5": "hmac-md5",
 }
 
 

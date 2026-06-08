@@ -86,11 +86,34 @@ def load_settings():
 
 def _write_atomic(path, data):
     d = os.path.dirname(path) or "."
+    # preserve the Kea config's existing mode/owner expectations (mkstemp is 0600,
+    # which would make the regenerated config unreadable to non-root Kea tooling).
+    try:
+        st = os.stat(path)
+        mode = st.st_mode & 0o777
+    except OSError:
+        st, mode = None, 0o644
     fd, tmp = tempfile.mkstemp(dir=d)
     try:
         with os.fdopen(fd, "w") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())  # contents on disk before the rename
+        os.chmod(tmp, mode)
+        if st is not None and os.geteuid() == 0:
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
         os.replace(tmp, path)
+        try:                       # durable rename (no 0-byte config after a crash)
+            dfd = os.open(d, os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
     except Exception:
         try:
             os.remove(tmp)
@@ -135,13 +158,21 @@ def patch_dhcp(path, root_key, s):
     # disabled"). Point it at D2's loopback listen address. ddns-update-on-renew
     # re-asserts records on every lease commit (not just first allocation), for
     # parity with a commit-hook approach and resilience if a record is ever lost.
-    node["dhcp-ddns"] = {
+    # Merge (don't clobber) — preserve any extra keys a user set on an existing
+    # dhcp-ddns block (e.g. max-queue-size, sender-ip), only forcing the connection
+    # params we require so NCRs reach our listener.
+    ddns_block = dict(node.get("dhcp-ddns") or {})
+    required = {
         "enable-updates": True,
         "server-ip": s.get("d2_ip", "127.0.0.1"),
         "server-port": s.get("d2_port", 53001),
         "ncr-protocol": "UDP",
         "ncr-format": "JSON",
     }
+    if any(k not in required for k in ddns_block):
+        log("preserving extra keys on the existing dhcp-ddns block")
+    ddns_block.update(required)
+    node["dhcp-ddns"] = ddns_block
     node["ddns-update-on-renew"] = bool(s.get("update_on_renew", True))
     # OPNsense emits a per-subnet "ddns-send-updates": false (no per-subnet DDNS
     # server is set), which would OVERRIDE our global true via Kea's subnet>global

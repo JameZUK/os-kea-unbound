@@ -25,10 +25,16 @@ if [ -f "$LOG" ] && [ "$n" -le "$cur" ]; then
     exit 0
 fi
 
-# need older history: rotated archives oldest-first (highest index), then current
+# need older history: rotated archives oldest-first (highest index), then current.
+# Sort by the numeric rotation index extracted from the filename (keaunbound.log.<N>.<ext>)
+# rather than a positional field, so it's correct regardless of the directory path
+# or a bz2/gz mix.
 {
-    for f in $(ls -1 "$LOGDIR"/keaunbound.log.*.bz2 "$LOGDIR"/keaunbound.log.*.gz 2>/dev/null \
-               | sort -t. -k3 -rn); do
+    for f in $(for a in "$LOGDIR"/keaunbound.log.*.bz2 "$LOGDIR"/keaunbound.log.*.gz; do
+                   [ -e "$a" ] || continue
+                   idx=$(basename "$a" | sed -E 's/^keaunbound\.log\.([0-9]+)\..*/\1/')
+                   printf '%s %s\n' "$idx" "$a"
+               done | sort -rn | awk '{print $2}'); do
         case "$f" in
             *.bz2) bzcat "$f" 2>/dev/null ;;
             *.gz)  zcat  "$f" 2>/dev/null ;;

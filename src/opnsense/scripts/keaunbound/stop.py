@@ -5,6 +5,7 @@
 
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -31,11 +32,25 @@ def _alive(pid):
         return False
 
 
+def _is_ours(pid):
+    """True only if the live PID is actually our listener/supervisor — guards
+    against a stale pidfile whose PID the OS has recycled for something else."""
+    if not _alive(pid):
+        return False
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return False
+    return "kea-unbound-ddns" in out
+
+
 def stop():
-    # Signal the supervisor first so it stops respawning the child.
+    # Signal the supervisor first so it stops respawning the child. Only signal a
+    # PID we've confirmed is ours.
     for path in (SUPERVISOR_PID, PIDFILE):
         pid = _read_pid(path)
-        if _alive(pid):
+        if _is_ours(pid):
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
@@ -43,13 +58,13 @@ def stop():
     # Wait for the child to exit.
     deadline = time.time() + 10
     while time.time() < deadline:
-        if not _alive(_read_pid(PIDFILE)):
+        if not _is_ours(_read_pid(PIDFILE)):
             break
         time.sleep(0.25)
-    # Force-kill anything that lingers.
+    # Force-kill anything of ours that lingers.
     for path in (SUPERVISOR_PID, PIDFILE):
         pid = _read_pid(path)
-        if _alive(pid):
+        if _is_ours(pid):
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:

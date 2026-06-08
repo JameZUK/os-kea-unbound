@@ -10,6 +10,7 @@ the listener with daemon(8) -r (auto-respawn). Stops any existing instance first
 so `start` is idempotent and doubles as `restart`.
 """
 
+import fcntl
 import os
 import subprocess
 import sys
@@ -69,18 +70,28 @@ def build_args(gen, domain):
 
 def main():
     os.makedirs(RUN_DIR, exist_ok=True)
-    gen, domain = load_settings()
-    if gen is None or _text(gen, "enabled") != "1":
-        # Not enabled: make sure nothing is running and exit cleanly.
+    # Serialize start/restart against itself: two overlapping runs (e.g. a boot
+    # configure racing a GUI apply) could each stop+spawn and orphan a supervisor
+    # that then respawns a second listener on the same port. The lock makes the
+    # stop+spawn atomic.
+    lock = open(os.path.join(RUN_DIR, "start.lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        gen, domain = load_settings()
+        if gen is None or _text(gen, "enabled") != "1":
+            # Not enabled: make sure nothing is running and exit cleanly.
+            stopper.stop()
+            return 0
+        # Idempotent: stop any existing instance before (re)starting.
         stopper.stop()
-        return 0
-    # Idempotent: stop any existing instance before (re)starting.
-    stopper.stop()
-    args = build_args(gen, domain)
-    cmd = ["/usr/sbin/daemon", "-f", "-r", "-R", "5",
-           "-p", PIDFILE, "-P", SUPERVISOR_PID,
-           "/usr/local/bin/python3"] + args
-    subprocess.run(cmd, check=False)
+        args = build_args(gen, domain)
+        cmd = ["/usr/sbin/daemon", "-f", "-r", "-R", "5",
+               "-p", PIDFILE, "-P", SUPERVISOR_PID,
+               "/usr/local/bin/python3"] + args
+        subprocess.run(cmd, check=False)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
     # Seed existing leases/reservations so DNS is populated immediately rather than
     # waiting for the next DDNS event. Best-effort; never blocks the listener start.
     sync = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lease-sync.py")

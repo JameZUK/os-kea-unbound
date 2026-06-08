@@ -5,5 +5,11 @@
 # out-of-band change). Run by FreeBSD periodic(8) via OPNsense's "periodic daily"
 # crontab entry. No-ops when the plugin is disabled (clean.py guards on settings).
 [ -x /usr/local/sbin/configctl ] || exit 0
-/usr/local/sbin/configctl keaunbound clean >/dev/null 2>&1
+out=$(/usr/local/sbin/configctl keaunbound clean 2>&1)
+# Surface a refusal/error in the daily periodic report rather than hiding it (so a
+# persistently-aborting clean — e.g. Kea unreachable for weeks — is noticed). A
+# normal/no-op run stays quiet. Always exit 0 so periodic doesn't flag a failure.
+case "$out" in
+    *aborted*|*unreachable*|*Traceback*) echo "os-kea-unbound daily clean: $out" ;;
+esac
 exit 0

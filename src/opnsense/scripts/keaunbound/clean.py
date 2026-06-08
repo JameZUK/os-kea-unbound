@@ -47,13 +47,24 @@ def main():
         log(msg)
         print("keaunbound: " + msg)
         return 1
-    try:
-        with open(INCLUDE_FILE) as f:
-            actual = R.parse_local_data_lines(f.read())
-    except OSError:
+    if not os.path.exists(INCLUDE_FILE):
         print("keaunbound: clean — nothing to do (no include file)")
         return 0
     desired_keys = {r.key() for r in kea_source.desired_records(settings["suffix"])}
+    # Only prune records of a family whose lease source we could confirm THIS run.
+    # If e.g. the dhcp4 socket is down and its CSV is stale, every v4 record would
+    # otherwise look "stale" and get mass-evicted — leave that family alone.
+    confirmed = {fam: kea_source.lease_source_ok(fam) for fam in ("4", "6")}
+
+    def family_of(r):
+        if r.rtype == "AAAA":
+            return "6"
+        if r.rtype == "A":
+            return "4"
+        if r.rtype == "PTR":
+            return "6" if r.name.endswith(".ip6.arpa.") else "4"
+        return None
+
     # Never prune a name OPNsense owns (manual Host Override or Kea reservation).
     # Those are static, not ours; removing one local_data_remove's the whole name
     # and evicts OPNsense's record from Unbound's runtime (this broke hostname
@@ -65,26 +76,34 @@ def main():
             return guard.is_static_ptr(r.name) or guard.is_reserved_ptr(r.name)
         return guard.is_static_forward(r.name, r.rtype) or guard.is_reserved_addr(r.rdata)
 
-    stale = [r for r in actual if r.key() not in desired_keys and not owned(r)]
-    if not stale:
-        print("keaunbound: clean — no stale records")
-        return 0
+    def is_stale(r):
+        if r.key() in desired_keys or owned(r):
+            return False
+        fam = family_of(r)
+        if fam is None or not confirmed.get(fam, False):
+            return False  # family's lease source unconfirmed -> don't risk it
+        return True
+
     # Anomaly guard: a steady-state clean prunes a handful. A huge prune means the
     # desired set was probably partial (e.g. the control socket answered while Kea
     # was reloading), so refuse rather than mass-evict still-valid records.
-    limit = max(20, len(actual) // 2)
-    if len(stale) > limit:
-        msg = ("clean aborted — %d of %d records would be pruned (> limit %d); "
-               "desired set looks partial, refusing to prune" % (len(stale), len(actual), limit))
+    def abort_if(actual, removed):
+        return len(removed) > max(20, len(actual) // 2)
+
+    zone = UnboundZone(include_file=INCLUDE_FILE, unbound_conf=UNBOUND_CONF,
+                       logger=lambda level, msg: None)
+    removed, aborted = zone.prune(is_stale, abort_if)
+    if aborted:
+        msg = ("clean aborted — %d records would be pruned (> half the file); "
+               "desired set looks partial, refusing to prune" % len(removed))
         log(msg)
         print("keaunbound: " + msg)
         return 1
-    zone = UnboundZone(include_file=INCLUDE_FILE, unbound_conf=UNBOUND_CONF,
-                       logger=lambda level, msg: None)
-    for r in stale:
-        zone.remove(r.name, r.rtype, r.rdata)
-    log("removed %d stale record(s)" % len(stale))
-    print("keaunbound: clean removed %d stale record(s)" % len(stale))
+    if not removed:
+        print("keaunbound: clean — no stale records")
+        return 0
+    log("removed %d stale record(s)" % len(removed))
+    print("keaunbound: clean removed %d stale record(s)" % len(removed))
     return 0
 
 

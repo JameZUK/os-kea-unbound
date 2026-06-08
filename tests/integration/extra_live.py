@@ -200,6 +200,27 @@ time.sleep(0.4)
 check("A18 dynamic host IS registered (fwd)", present("10.10.10.66") and in_file("dynhost"))
 uc("local_data_remove", "dynhost.internal.")
 
+# --- A19 TSIG algorithm pinning: a MAC valid under a DIFFERENT algorithm than the
+#     one configured (hmac-sha256) must be rejected — not just any valid MAC for
+#     the key. Sign the same key with hmac-sha1 and confirm it's dropped. ---
+def send_algo(zone, build, algo):
+    u = dns.update.Update(zone, keyring=KR, keyname=KNAME, keyalgorithm=algo)
+    build(u)
+    try:
+        dns.query.udp(u, "127.0.0.1", port=53535, timeout=5)
+    except Exception:
+        pass
+
+
+send_algo("internal.", lambda u: u.add("algotest.internal.", 1800, "A", "10.10.10.79"),
+          dns.tsig.HMAC_SHA1)
+time.sleep(0.4)
+check("A19 wrong-algorithm UPDATE rejected", not present("10.10.10.79"))
+send("internal.", lambda u: u.add("algook.internal.", 1800, "A", "10.10.10.78"))
+time.sleep(0.4)
+check("A19 correct-algorithm UPDATE still applied", present("10.10.10.78"))
+uc("local_data_remove", "algook.internal.")
+
 # --- H daemon(8) respawn after a crash ---
 oldpid = int(open(PIDF).read().strip())
 os.kill(oldpid, 9)

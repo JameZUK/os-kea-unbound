@@ -70,11 +70,30 @@ class UnboundZone:
         data = header + body + ("\n" if body else "")
         d = os.path.dirname(self.include_file) or "."
         os.makedirs(d, exist_ok=True)
+        # preserve the existing file's permissions (mkstemp creates 0600, which
+        # would silently drop read access on every rewrite); default to 0644.
+        try:
+            mode = os.stat(self.include_file).st_mode & 0o777
+        except OSError:
+            mode = 0o644
         fd, tmp = tempfile.mkstemp(dir=d)
         try:
             with os.fdopen(fd, "w") as fh:
                 fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())  # data on disk before the rename
+            os.chmod(tmp, mode)
             os.replace(tmp, self.include_file)
+            # fsync the directory so the rename itself is durable (no 0-byte
+            # include file surviving a crash/power-loss).
+            try:
+                dfd = os.open(d, os.O_DIRECTORY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
         except Exception:
             try:
                 os.remove(tmp)
@@ -170,6 +189,32 @@ class UnboundZone:
                 self._reconcile_runtime(ptr)
             self.logger("info", "Cleaned stale %s for %s: %s" % (rtype, name, ", ".join(stale_ips)))
             return stale_ips
+
+    def prune(self, is_stale, abort_if=None):
+        """Remove every current record for which is_stale(record) is True, under a
+        single lock so the decision can't race the live listener (it re-loads the
+        file inside the lock and evaluates is_stale against that snapshot).
+
+        abort_if(actual, removed) -> bool lets the caller veto a suspicious bulk
+        prune (e.g. a partial desired set); when it vetoes, nothing is changed.
+        Returns (removed_records, aborted)."""
+        with _Lock(self.lock_path):
+            self._load()
+            actual = list(self._records)
+            removed = [r for r in actual if is_stale(r)]
+            if not removed:
+                return ([], False)
+            if abort_if is not None and abort_if(actual, removed):
+                return (removed, True)
+            removed_keys = {r.key() for r in removed}
+            names = {r.name for r in removed}
+            self._records = [r for r in self._records if r.key() not in removed_keys]
+            self._write_file()
+            for n in names:
+                self._reconcile_runtime(n)
+            for r in removed:
+                self.logger("info", "Pruned %s" % r.local_data_line())
+            return (removed, False)
 
 
 class _Lock:

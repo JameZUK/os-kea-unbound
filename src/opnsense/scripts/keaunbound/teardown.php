@@ -39,8 +39,17 @@ if ($wasManaged) {
 }
 Config::getInstance()->save();
 
-// 2. stop the listener
+// 2. stop the listener — and confirm it is actually down before flushing, so an
+//    orphaned listener can't re-add records during/after the flush below.
 $backend->configdRun('keaunbound stop');
+$pidfile = '/var/run/keaunbound/kea-unbound-ddns.pid';
+for ($i = 0; $i < 20 && is_file($pidfile); $i++) {
+    usleep(250000);
+}
+if (is_file($pidfile)) {
+    syslog(LOG_WARNING, 'os-kea-unbound: listener still appears to be running after stop; '
+        . 'flushing records anyway');
+}
 
 // 3. flush our records from Unbound, then remove the include file
 $include = '/usr/local/etc/unbound.opnsense.d/keaunbound.conf';

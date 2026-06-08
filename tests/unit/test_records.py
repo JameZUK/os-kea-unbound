@@ -19,10 +19,53 @@ def test_ptr_name_v4_v6():
 
 def test_host_fqdn():
     assert R.host_fqdn("Laptop", "home.lan") == "laptop.home.lan."
-    assert R.host_fqdn("host.sub.example", "home.lan") == "host.home.lan."  # first label + suffix
+    # a multi-label hostname is already qualified -> used verbatim (matches the
+    # FQDN the live DDNS path writes), NOT relabelled to first-label + suffix.
+    assert R.host_fqdn("host.sub.example", "home.lan") == "host.sub.example."
+    assert R.host_fqdn("server.corp.com.", "home.lan") == "server.corp.com."
     assert R.host_fqdn("we!rd_chars", "home.lan") == "werdchars.home.lan."
     assert R.host_fqdn("", "home.lan") == ""
     assert R.host_fqdn("x", "") == "x."
+
+
+def test_norm_ip_zone_and_mapped():
+    # IPv6 zone/scope id is stripped before comparison
+    assert R._norm_ip("fe80::1%igb0") == "fe80::1"
+    # IPv4-mapped IPv6 collapses to the v4 form so lease/reservation forms match
+    assert R._norm_ip("::ffff:192.0.2.5") == "192.0.2.5"
+    assert R._norm_ip("2001:DB8::0:1") == "2001:db8::1"
+    assert R._norm_ip("not-an-ip") is None
+    assert R._norm_ip(None) is None
+
+
+def test_norm_ip_mapped_matches_reservation(tmp_path):
+    import json
+    p4 = tmp_path / "kea-dhcp4.conf"
+    p4.write_text(json.dumps({"Dhcp4": {"reservations": [
+        {"hostname": "h", "ip-address": "192.0.2.5"}]}}))
+    g = R.StaticGuard(str(tmp_path / "he.conf"), [str(p4)])
+    # a lease reported in IPv4-mapped form must still match the v4 reservation
+    assert g.is_reserved_addr("::ffff:192.0.2.5")
+
+
+def test_reserved_ips_missing_vs_unreadable(tmp_path):
+    # missing config -> empty set (that family simply has no reservations)
+    assert R.reserved_ips_from_config(str(tmp_path / "absent.conf")) == set()
+    # present but unparseable -> raises (so callers don't read "couldn't" as "none")
+    bad = tmp_path / "bad.conf"
+    bad.write_text('{ this is not json')
+    import pytest
+    with pytest.raises(R.ReservedConfigError):
+        R.reserved_ips_from_config(str(bad))
+
+
+def test_static_guard_tolerates_unreadable_kea_config(tmp_path):
+    # a momentarily-unreadable Kea config must not break the guard (host_entries
+    # is the primary source); it just contributes no reserved IPs.
+    bad = tmp_path / "bad.conf"
+    bad.write_text("{ partial")
+    g = R.StaticGuard(str(tmp_path / "he.conf"), [str(bad)])
+    assert not g.is_reserved_addr("10.0.0.1")
 
 
 def test_is_reverse_name():

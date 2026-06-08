@@ -30,11 +30,18 @@ def host_fqdn(hostname: str, suffix: str) -> str:
     """
     Build an absolute FQDN from a (possibly bare) DHCP hostname and a qualifying
     suffix, used by the static-sync path (the DDNS path gets ready-made FQDNs from
-    Kea). Takes the first label, lowercases it, strips invalid chars, appends the
-    suffix. Returns "" if there is no usable label.
+    Kea). Returns "" if there is no usable label.
+
+    A multi-label hostname is already qualified (Kea and clients send FQDNs), so it
+    is used verbatim — this is what the live DDNS path writes, so the sync/clean
+    "desired" name matches the listener's name instead of diverging.
     """
-    label = (hostname or "").strip().lower().split(".")[0]
-    label = "".join(c for c in label if c.isalnum() or c == "-")
+    raw = (hostname or "").strip().lower().rstrip(".")
+    if not raw:
+        return ""
+    if "." in raw:
+        return fqdn(raw)
+    label = "".join(c for c in raw if c.isalnum() or c == "-")
     if not label:
         return ""
     suffix = (suffix or "").strip().strip(".")
@@ -116,11 +123,30 @@ def parse_local_data_lines(text: str):
 
 
 def _norm_ip(value):
-    """Canonical string form of an IP, or None if it isn't one."""
+    """Canonical string form of an IP, or None if it isn't one.
+
+    Strips an IPv6 zone id (``fe80::1%igb0``) and collapses an IPv4-mapped IPv6
+    address (``::ffff:192.0.2.5``) to its v4 form, so the same host written by Kea
+    and stored in a reservation compares equal regardless of which form was used.
+    """
     try:
-        return str(ipaddress.ip_address((value or "").strip()))
+        s = (value or "").strip()
+        if "%" in s:                     # drop IPv6 scope/zone id before parsing
+            s = s.split("%", 1)[0]
+        addr = ipaddress.ip_address(s)
+        mapped = getattr(addr, "ipv4_mapped", None)
+        if mapped is not None:
+            addr = mapped
+        return str(addr)
     except (ValueError, AttributeError):
         return None
+
+
+class ReservedConfigError(Exception):
+    """A Kea config exists but could not be read/parsed (e.g. mid-regeneration).
+
+    Distinct from "no config present" so callers can refuse to treat reservations
+    as dynamic when the source is merely momentarily unreadable."""
 
 
 def reserved_ips_from_config(path: str):
@@ -128,13 +154,19 @@ def reserved_ips_from_config(path: str):
 
     Covers global, per-subnet and shared-network reservations. Used to protect a
     reserved host's records from DDNS deletes even before OPNsense has (re)written
-    host_entries.conf — a reservation is a permanent host<->IP mapping."""
+    host_entries.conf — a reservation is a permanent host<->IP mapping.
+
+    Returns an empty set when the config simply does not exist (that family has no
+    reservations); raises ReservedConfigError when the file is present but cannot be
+    parsed, so the caller doesn't mistake "couldn't read" for "none reserved"."""
     out = set()
     try:
         with open(path) as fh:
             cfg = json.load(fh)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return out
+    except (OSError, ValueError) as exc:
+        raise ReservedConfigError(path) from exc
     if "Dhcp4" in cfg:
         root, subkey = cfg["Dhcp4"], "subnet4"
     elif "Dhcp6" in cfg:
@@ -180,7 +212,13 @@ class StaticGuard:
         except OSError:
             pass  # no static entries / file absent
         for path in kea_paths:
-            for ip in reserved_ips_from_config(path):
+            try:
+                ips = reserved_ips_from_config(path)
+            except ReservedConfigError:
+                # secondary guard only (host_entries.conf is primary); tolerate a
+                # momentarily-unreadable Kea config rather than failing the guard.
+                ips = set()
+            for ip in ips:
                 self._reserved.add(ip)
                 try:
                     self._reserved_ptr.add(ptr_name(ip))

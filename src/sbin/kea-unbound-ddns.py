@@ -163,6 +163,16 @@ class Listener:
         if self.keyring is not None and not getattr(msg, "had_tsig", False):
             log.warning("Dropped unsigned UPDATE from %s (TSIG required)", addr)
             return
+        # Pin the algorithm. from_wire already pins the key *name* (the keyring holds
+        # only our key), but a sender holding the secret could still present a valid
+        # MAC under a weaker/other algorithm than we configured — reject that.
+        if self.keyring is not None:
+            got = str(getattr(msg, "keyalgorithm", "") or "").rstrip(".").lower()
+            want = (self.keyalgo or "").rstrip(".").lower()
+            if got and want and got != want:
+                log.warning("Dropped UPDATE from %s (TSIG algorithm %s != %s)",
+                            addr, got, want)
+                return
 
         # Acknowledge FIRST, then apply. We don't do RFC 2136 prerequisite-based
         # conflict resolution (we own the zone) and always reply NOERROR, so there
@@ -179,16 +189,22 @@ class Listener:
         # RFC 2136 operation is carried in each RRset's `.deleting` (dnspython):
         #   None -> add; NONE -> delete a specific RR; ANY -> delete an RRset / all.
         for rrset in msg.authority:
-            name = rrset.name.to_text()
-            rtype = dns.rdatatype.to_text(rrset.rdtype)
-            if rrset.deleting is None:
-                for rdata in rrset:
-                    self._add(name, rrset.ttl, rtype, rdata.to_text())
-            elif len(rrset) == 0:
-                self._delete(name, rtype, None)
-            else:
-                for rdata in rrset:
-                    self._delete(name, rtype, rdata.to_text())
+            # Never let one malformed (but TSIG-valid) RRset escape and kill the
+            # serve loop — log it and keep applying the rest.
+            try:
+                name = rrset.name.to_text()
+                rtype = dns.rdatatype.to_text(rrset.rdtype)
+                if rrset.deleting is None:
+                    for rdata in rrset:
+                        self._add(name, rrset.ttl, rtype, rdata.to_text())
+                elif len(rrset) == 0:
+                    self._delete(name, rtype, None)
+                else:
+                    for rdata in rrset:
+                        self._delete(name, rtype, rdata.to_text())
+            except Exception as exc:  # noqa: BLE001 - one bad record must not crash the daemon
+                log.warning("Failed to apply RRset %s: %s",
+                            getattr(getattr(rrset, "name", None), "to_text", lambda: "?")(), exc)
 
     # ---- main loop --------------------------------------------------------
     def serve(self):

@@ -91,6 +91,14 @@ def leases_csv(family):
                 try:
                     if int(row.get("state", "0") or 0) != 0:
                         continue
+                    # the v6 memfile holds IA_NA, IA_TA and IA_PD rows; only IA_NA
+                    # (lease_type 0) are host addresses. Never turn a delegated
+                    # prefix (IA_PD) into a host AAAA/PTR. (Matches the socket path,
+                    # which keeps only type IA_NA.)
+                    if family == "6":
+                        lt = (row.get("lease_type") or "0").strip()
+                        if lt not in ("", "0", "IA_NA"):
+                            continue
                     exp = row.get("expire", "")
                     if exp and int(exp) <= now:
                         continue
@@ -123,22 +131,53 @@ def leases(family):
     return leases_csv(family)
 
 
-def kea_reachable():
-    """True if we can trust an empty desired set (Kea answered, or a CSV exists).
+# A memfile CSV persists on disk after Kea stops, so its mere existence is not
+# evidence Kea is current. Trust it as a lease source only if it was written
+# recently (Kea rewrites it on lease changes / LFC while running).
+CSV_MAX_AGE = 1800  # seconds
 
-    Guards clean from wiping everything when Kea is merely unreachable."""
-    for svc in ("dhcp4", "dhcp6"):
-        resp = kea_ctrl.send_command("status-get", service=svc)
-        if isinstance(resp, dict) and resp.get("result") == 0:
-            return True
-    return os.path.exists(CSV4) or os.path.exists(CSV6)
+
+def lease_source_ok(family):
+    """True if we have an *authoritative* current lease list for this family this
+    run: a live control-socket answer, or a CSV that exists and is fresh. Lets
+    clean prune a family's records only when that family's source is trustworthy."""
+    svc = "dhcp4" if family == "4" else "dhcp6"
+    resp = kea_ctrl.send_command("status-get", service=svc)
+    if isinstance(resp, dict) and resp.get("result") == 0:
+        return True
+    path = CSV4 if family == "4" else CSV6
+    try:
+        return (time.time() - os.path.getmtime(path)) < CSV_MAX_AGE
+    except OSError:
+        return False
+
+
+def kea_reachable():
+    """True if at least one family has a trustworthy lease source right now.
+
+    Guards clean from wiping everything when Kea is merely unreachable (a stale
+    leftover CSV no longer counts — see lease_source_ok)."""
+    return any(lease_source_ok(fam) for fam in ("4", "6"))
+
+
+def _reserved_for_family(fam):
+    """(reserved IP set, readable) for one family's Kea config. readable is False
+    only when the config exists but couldn't be parsed — the caller then skips that
+    family rather than risk treating a reservation as a dynamic lease."""
+    path = KEA4 if fam == "4" else KEA6
+    try:
+        return R.reserved_ips_from_config(path), True
+    except R.ReservedConfigError:
+        return set(), False
 
 
 def reserved_ips():
-    """Canonical set of all Kea-reserved IPs (v4 + v6)."""
+    """Canonical set of all Kea-reserved IPs (v4 + v6). Tolerant: a momentarily
+    unreadable config contributes nothing rather than raising."""
     s = set()
-    for path in (KEA4, KEA6):
-        s |= R.reserved_ips_from_config(path)
+    for fam in ("4", "6"):
+        ips, _ = _reserved_for_family(fam)
+        s |= ips
     return s
 
 
@@ -150,10 +189,16 @@ def desired_records(suffix):
     solely to add dynamic-lease DNS — which Kea + Unbound do not do natively — so
     we skip any lease whose address is a reservation and never touch an
     OPNsense-owned static name. Each dynamic lease still gets BOTH the forward
-    (A/AAAA) and the reverse (PTR) record."""
-    resv = reserved_ips()
+    (A/AAAA) and the reverse (PTR) record.
+
+    Reservations are read per family. If a family's Kea config is present but
+    unreadable (e.g. mid-regeneration) we skip that whole family rather than risk
+    classifying a reserved host as dynamic."""
     recs = []
     for fam in ("4", "6"):
+        resv, ok = _reserved_for_family(fam)
+        if not ok:
+            continue  # config present but unreadable -> skip this family
         for host, ip in leases(fam):
             n = R._norm_ip(ip)
             if n is None or n in resv:

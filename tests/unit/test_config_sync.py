@@ -42,6 +42,22 @@ def test_patch_dhcp_global_and_subnet_override(tmp_path):
     assert m.patch_dhcp(str(p), "Dhcp4", SETTINGS) is False  # idempotent
 
 
+def test_patch_dhcp_merges_existing_ddns_block(tmp_path):
+    # a user's extra dhcp-ddns keys must be preserved, only the connection params
+    # we require are forced (non-destructive merge, not a clobber).
+    m = load_injector(tmp_path)
+    p = tmp_path / "k4.json"
+    json.dump({"Dhcp4": {"subnet4": [], "dhcp-ddns": {
+        "enable-updates": False, "max-queue-size": 2048, "sender-ip": "127.0.0.2",
+    }}}, open(p, "w"))
+    assert m.patch_dhcp(str(p), "Dhcp4", SETTINGS) is True
+    block = json.load(open(p))["Dhcp4"]["dhcp-ddns"]
+    assert block["enable-updates"] is True            # forced on
+    assert block["server-ip"] == "127.0.0.1"          # forced to our D2
+    assert block["max-queue-size"] == 2048            # user key preserved
+    assert block["sender-ip"] == "127.0.0.2"          # user key preserved
+
+
 def test_patch_dhcp_update_on_renew_off(tmp_path):
     m = load_injector(tmp_path)
     p = tmp_path / "k4.json"
