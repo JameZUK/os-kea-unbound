@@ -106,6 +106,18 @@ def _load_json(path):
         return None
 
 
+def _d2_listen(path):
+    """D2's loopback listen address (where kea-dhcp4/6 send NCRs). Defaults to
+    Kea's 127.0.0.1:53001 when the field is absent — matches OPNsense's D2."""
+    d2 = (_load_json(path) or {}).get("DhcpDdns") or {}
+    ip = d2.get("ip-address") or "127.0.0.1"
+    try:
+        port = int(d2.get("port") or 53001)
+    except (TypeError, ValueError):
+        port = 53001
+    return ip, port
+
+
 def patch_dhcp(path, root_key, s):
     cfg = _load_json(path)
     if not isinstance(cfg, dict) or not isinstance(cfg.get(root_key), dict):
@@ -117,6 +129,19 @@ def patch_dhcp(path, root_key, s):
         node["ddns-qualifying-suffix"] = s["suffix"]
     node["ddns-replace-client-name"] = "when-not-present"
     node["ddns-generated-prefix"] = "host"
+    # Master DDNS switch. Without dhcp-ddns.enable-updates the server never sends
+    # NCRs to D2 at all, regardless of ddns-send-updates (Kea logs "DDNS:
+    # disabled"). Point it at D2's loopback listen address. ddns-update-on-renew
+    # re-asserts records on every lease commit (not just first allocation), for
+    # parity with a commit-hook approach and resilience if a record is ever lost.
+    node["dhcp-ddns"] = {
+        "enable-updates": True,
+        "server-ip": s["d2_ip"],
+        "server-port": s["d2_port"],
+        "ncr-protocol": "UDP",
+        "ncr-format": "JSON",
+    }
+    node["ddns-update-on-renew"] = True
     # OPNsense emits a per-subnet "ddns-send-updates": false (no per-subnet DDNS
     # server is set), which would OVERRIDE our global true via Kea's subnet>global
     # inheritance. Strip ONLY that false default (never an explicit user true) so
@@ -147,12 +172,20 @@ def patch_d2(path, s):
             dom["key-name"] = keyname
         return dom
 
-    # Forward: keep any user domains (name != "."), (re)add our catch-all ".".
+    # Forward: Kea D2 matches forward domains by DNS suffix and does NOT honour
+    # "." as a catch-all (it never matches a normal FQDN — confirmed on Kea 3.0.3:
+    # "DHCP_DDNS_NO_MATCH"). So register the qualifying-suffix zone explicitly —
+    # every name Kea emits is qualified into it (ddns-qualifying-suffix +
+    # ddns-replace-client-name). "." is kept only as a harmless fallback in case a
+    # future Kea honours it; today it simply never matches.
+    suffix_zone = (s["suffix"].strip(".").lower() + ".") if s.get("suffix") else None
+    our_fwd_names = {CATCHALL_FWD} | ({suffix_zone} if suffix_zone else set())
     fwd = (d2.get("forward-ddns") or {}).get("ddns-domains") or []
-    user_fwd = [d for d in fwd if d.get("name") != CATCHALL_FWD]
+    user_fwd = [d for d in fwd if d.get("name") not in our_fwd_names]
     if user_fwd:
-        log("preserving %d user forward DDNS domain(s); adding catch-all" % len(user_fwd))
-    d2["forward-ddns"] = {"ddns-domains": user_fwd + [catchall(CATCHALL_FWD)]}
+        log("preserving %d user forward DDNS domain(s)" % len(user_fwd))
+    our_fwd = ([catchall(suffix_zone)] if suffix_zone else []) + [catchall(CATCHALL_FWD)]
+    d2["forward-ddns"] = {"ddns-domains": user_fwd + our_fwd}
 
     # Reverse: keep user domains, (re)add our in-addr.arpa./ip6.arpa. catch-alls.
     rev = (d2.get("reverse-ddns") or {}).get("ddns-domains") or []
@@ -179,6 +212,7 @@ def main():
     if s is None:
         print("keaunbound: disabled/unreadable — no DDNS injection")
         return 0
+    s["d2_ip"], s["d2_port"] = _d2_listen(D2)
     changed = []
     if patch_dhcp(KEA4, "Dhcp4", s):
         changed.append("dhcp4")
