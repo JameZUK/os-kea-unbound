@@ -142,6 +142,51 @@ check("A14 non-reserved A still removable", not present("10.10.10.72"))
 uc("local_data_remove", "reserved-host.internal.")   # clean up test artifacts
 uc("local_data_remove", RPTR)
 
+# --- A15 lease lifecycle: an add-NCR registers, a delete-NCR (lease release)
+#     removes — the native-DDNS equivalent of the old lease*_committed /
+#     lease*_expire hook tests. ---
+send("internal.", lambda u: u.add("leaselife.internal.", 1800, "A", "10.10.10.81"))
+time.sleep(0.3)
+send("10.10.10.in-addr.arpa.",
+     lambda u: u.add("81.10.10.10.in-addr.arpa.", 1800, "PTR", "leaselife.internal."))
+time.sleep(0.4)
+check("A15 lease add: A+PTR present",
+      present("10.10.10.81") and present("81.10.10.10.in-addr.arpa."))
+send("internal.", lambda u: u.delete("leaselife.internal.", "A", "10.10.10.81"))
+time.sleep(0.3)
+send("10.10.10.in-addr.arpa.", lambda u: u.delete("81.10.10.10.in-addr.arpa."))
+time.sleep(0.4)
+check("A15 lease release: A removed", not present("10.10.10.81"))
+check("A15 lease release: PTR removed", not present("81.10.10.10.in-addr.arpa."))
+
+# --- A16 multiple RRsets in one UPDATE packet are all applied (old multi-lease
+#     leases*_committed). handle() iterates every RRset in msg.authority. ---
+def _multi(u):
+    u.add("multi1.internal.", 1800, "A", "10.10.10.82")
+    u.add("multi2.internal.", 1800, "A", "10.10.10.83")
+    u.add("multi1.internal.", 1800, "AAAA", "2001:db8::82")
+send("internal.", _multi)
+time.sleep(0.6)
+check("A16 multi-RRset: host1 A", present("10.10.10.82"))
+check("A16 multi-RRset: host2 A", present("10.10.10.83"))
+check("A16 multi-RRset: host1 AAAA", present("2001:db8::82"))
+for n in ("multi1.internal.", "multi2.internal."):
+    uc("local_data_remove", n)
+
+# --- A17 dual-stack added v6 THEN v4 (old TEST 4 ordering): both resolve, and a
+#     v6 removal leaves the v4 A intact. ---
+send("internal.", lambda u: u.add("v6first.internal.", 1800, "AAAA", "2001:db8::84"))
+time.sleep(0.3)
+send("internal.", lambda u: u.add("v6first.internal.", 1800, "A", "10.10.10.84"))
+time.sleep(0.4)
+check("A17 v6->v4 order: both present",
+      present("2001:db8::84") and present("10.10.10.84"))
+send("internal.", lambda u: u.delete("v6first.internal.", "AAAA", "2001:db8::84"))
+time.sleep(0.4)
+check("A17 v6->v4 order: AAAA removed, A preserved",
+      present("10.10.10.84") and not present("2001:db8::84"))
+uc("local_data_remove", "v6first.internal.")
+
 # --- H daemon(8) respawn after a crash ---
 oldpid = int(open(PIDF).read().strip())
 os.kill(oldpid, 9)

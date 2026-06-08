@@ -136,8 +136,8 @@ def patch_dhcp(path, root_key, s):
     # parity with a commit-hook approach and resilience if a record is ever lost.
     node["dhcp-ddns"] = {
         "enable-updates": True,
-        "server-ip": s["d2_ip"],
-        "server-port": s["d2_port"],
+        "server-ip": s.get("d2_ip", "127.0.0.1"),
+        "server-port": s.get("d2_port", 53001),
         "ncr-protocol": "UDP",
         "ncr-format": "JSON",
     }

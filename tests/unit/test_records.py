@@ -81,3 +81,50 @@ def test_static_guard_missing_file(tmp_path):
     g = R.StaticGuard(str(tmp_path / "nope.conf"))
     assert not g.is_static_forward("anything.example.com", "A")
     assert not g.is_static_ptr("1.2.3.4.in-addr.arpa")
+
+
+def test_reserved_ips_from_config(tmp_path):
+    import json
+    p4 = tmp_path / "kea-dhcp4.conf"
+    p4.write_text(json.dumps({"Dhcp4": {
+        "subnet4": [{"subnet": "10.10.3.0/24", "reservations": [
+            {"hostname": "host-a", "ip-address": "10.10.3.20"}]}],
+        "shared-networks": [{"subnet4": [{"subnet": "10.10.4.0/24", "reservations": [
+            {"hostname": "host-b", "ip-address": "10.10.4.9"}]}]}],
+        "reservations": [{"hostname": "host-g", "ip-address": "10.10.3.5"}],  # global
+    }}))
+    p6 = tmp_path / "kea-dhcp6.conf"
+    p6.write_text(json.dumps({"Dhcp6": {"subnet6": [
+        {"subnet": "2001:db8::/64", "reservations": [
+            {"hostname": "host-6", "ip-addresses": ["2001:db8::20"]}]}]}}))
+    ips = R.reserved_ips_from_config(str(p4)) | R.reserved_ips_from_config(str(p6))
+    assert ips == {"10.10.3.20", "10.10.4.9", "10.10.3.5", "2001:db8::20"}
+
+
+def test_reservation_guard(tmp_path):
+    import json
+    p4 = tmp_path / "kea-dhcp4.conf"
+    p4.write_text(json.dumps({"Dhcp4": {"subnet4": [
+        {"subnet": "10.10.3.0/24", "reservations": [
+            {"hostname": "printer", "ip-address": "10.10.3.20"}]}]}}))
+    p6 = tmp_path / "kea-dhcp6.conf"
+    p6.write_text(json.dumps({"Dhcp6": {"subnet6": [
+        {"subnet": "2001:db8::/64", "reservations": [
+            {"hostname": "nas", "ip-addresses": ["2001:db8::20"]}]}]}}))
+    g = R.StaticGuard(str(tmp_path / "host_entries.conf"), [str(p4), str(p6)])
+    # the reserved IP is protected, by address and by its PTR name (v4 + v6)
+    assert g.is_reserved_addr("10.10.3.20")
+    assert g.is_reserved_addr("2001:DB8:0:0:0:0:0:20")   # canonicalised v6 match
+    assert g.is_reserved_ptr(R.ptr_name("10.10.3.20"))
+    assert g.is_reserved_ptr(R.ptr_name("2001:db8::20"))
+    # unrelated addresses / names are not
+    assert not g.is_reserved_addr("10.10.3.99")
+    assert not g.is_reserved_ptr(R.ptr_name("10.10.3.99"))
+    assert not g.is_reserved_addr("not-an-ip")
+
+
+def test_reservation_guard_no_kea_paths(tmp_path):
+    # backward-compatible: no kea paths -> nothing reserved
+    g = R.StaticGuard(str(tmp_path / "host_entries.conf"))
+    assert not g.is_reserved_addr("10.10.3.20")
+    assert not g.is_reserved_ptr("20.3.10.10.in-addr.arpa.")
