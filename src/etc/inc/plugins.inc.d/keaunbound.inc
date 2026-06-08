@@ -6,12 +6,12 @@
  *
  * Plugin registration for os-kea-unbound (DDNS edition).
  *
- * Phase 3: registers the listener as a supervised service and starts/stops it on
- * boot according to the enabled flag.
- *
- * Phase 4 will add the `kea_sync` hook (to inject DDNS settings into Kea's
- * generated config after kea_configure_do, before the daemon starts) and the
- * auto-enable of Kea's DDNS daemon.
+ * Registers the listener as a supervised service, starts/stops it on boot, and
+ * registers a `kea_sync` hook that injects DDNS settings into Kea's generated
+ * config. The hook runs as part of `pluginctl -c kea_sync`, after kea.inc's
+ * kea_configure_do has regenerated the daemon configs (kea sorts before
+ * keaunbound), so our injection always lands on the fresh config and is
+ * re-applied on every Kea reconfigure.
  */
 
 function keaunbound_enabled()
@@ -42,6 +42,7 @@ function keaunbound_configure()
 {
     return [
         'bootup' => ['keaunbound_configure_do'],
+        'kea_sync' => ['keaunbound_kea_sync'],
     ];
 }
 
@@ -53,4 +54,15 @@ function keaunbound_configure_do($verbose = false)
     } else {
         $backend->configdRun('keaunbound stop');
     }
+}
+
+/**
+ * kea_sync hook: inject our DDNS settings into the just-regenerated Kea configs.
+ * Runs after kea.inc's kea_configure_do in the same `pluginctl -c kea_sync` pass.
+ * No-op when the plugin is disabled (the injector self-checks config.xml). The
+ * command is fixed (no user input); mwexecf escapes the argument regardless.
+ */
+function keaunbound_kea_sync($verbose = false)
+{
+    mwexecf('/usr/local/bin/python3 %s', '/usr/local/opnsense/scripts/keaunbound/kea-config-sync.py');
 }

@@ -1,5 +1,5 @@
 <model>
-    <mount>//OPNsense/KeaUnbound/general</mount>
+    <mount>//OPNsense/KeaUnbound</mount>
     <description>Kea Unbound DDNS general settings</description>
     <version>0.0.1</version>
     <items>
@@ -47,6 +47,12 @@
                 <Required>Y</Required>
                 <description>On a new address for a host, remove older addresses Kea no longer recognises for that host.</description>
             </aggressive_cleanup>
+            <!-- internal bookkeeping (not shown in the form): set when THIS plugin
+                 enabled Kea's DDNS daemon, so we revert it on disable/uninstall only
+                 if it was off before we touched it. -->
+            <manage_kea_ddns type="BooleanField">
+                <Default>0</Default>
+            </manage_kea_ddns>
         </general>
     </items>
 </model>

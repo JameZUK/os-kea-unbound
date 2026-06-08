@@ -99,7 +99,8 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **1 — Settings model + UI** (General model/controller/view, TSIG key gen)
 - [x] **2 — Listener engine** (RFC 2136 + TSIG + hybrid apply + record logic; off-box unit-tested)
 - [x] **3 — Service wiring** (configd actions, start/stop, daemon(8) supervision, service registration)
-- [ ] **4 — kea_sync injector + D2 auto-enable** (first on-box end-to-end; verify rc precmd ordering)
+- [x] **4 — kea_sync injector + D2 auto-enable** (verified end-to-end on the test box)
+- [x] **4.5 — config safety** (record-before-mutate + revert, non-destructive D2 merge, atomic, alerts)
 - [ ] **5 — KCA static sync** (seed from existing leases/reservations)
 - [ ] **6 — Status page + helper**
 - [ ] **7 — Disable/uninstall cleanliness**
@@ -122,6 +123,27 @@ src/opnsense/service/conf/actions.d/actions_keaunbound.conf
 src/sbin/kea-unbound-ddns.py
 tests/
 ```
+
+## Empirical findings from the test box (OPNsense 26.1.9)
+
+- Base python is **3.13** → `PLUGIN_DEPENDS=py313-dnspython` (dnspython 2.8.0 already present). 
+- **Trigger confirmed:** `pluginctl -c kea_sync` regenerates the daemon configs by running
+  every plugin's kea_sync hook in `.inc` filename order. `kea.inc` (kea_configure_do) runs
+  first, our `keaunbound.inc` runs after → our injector lands on the fresh config. `configctl
+  kea restart` alone does NOT run kea_sync, so our ServiceController reconfigure runs
+  `template reload` + `kea restart` (and relies on the kea_sync pass). `template reload`
+  regenerates `keactrl.conf` (dhcp4/6/ddns yes/no) + `/etc/rc.conf.d/kea`.
+- **Model mount gotcha:** mount must be `//OPNsense/KeaUnbound` (NOT `.../general`), else the
+  `<general>` items wrapper produces a double `general` node and config readers miss `enabled`.
+- **Per-subnet override gotcha:** OPNsense emits per-subnet `ddns-send-updates: false` which
+  overrides our global `true` (Kea: subnet beats global). The injector strips that false so
+  subnets inherit the global value. It does NOT touch explicit per-subnet `true`.
+- **Config safety (4.5):** the only persistent setting we change is `Kea/ddns/general/enabled`
+  (0→1). We mark `manage_kea_ddns` when WE enable it, revert on disable only if we own it, and
+  never take ownership if the user already had it on. The generated-config edits are atomic
+  (os.replace), self-cleaning when disabled, and the D2 injector PRESERVES any user-configured
+  forward/reverse DDNS domains + TSIG keys (adds our catch-all alongside). Changes are logged
+  to `/var/log/keaunbound` and announced via syslog.
 
 ## Notes / open items for the test environment
 
