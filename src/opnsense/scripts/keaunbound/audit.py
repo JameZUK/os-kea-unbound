@@ -18,7 +18,7 @@ sys.path.insert(0, _SCRIPTS)
 from lib import records as R      # noqa: E402
 from lib import kea_source        # noqa: E402
 
-INCLUDE_FILE = "/var/unbound/etc/keaunbound.conf"
+INCLUDE_FILE = "/usr/local/etc/unbound.opnsense.d/keaunbound.conf"
 
 
 def _actual():

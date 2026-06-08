@@ -22,7 +22,7 @@ from lib import records as R          # noqa: E402
 from lib import kea_source            # noqa: E402
 from lib.unbound_io import UnboundZone  # noqa: E402
 
-INCLUDE_FILE = "/var/unbound/etc/keaunbound.conf"
+INCLUDE_FILE = "/usr/local/etc/unbound.opnsense.d/keaunbound.conf"
 UNBOUND_CONF = "/var/unbound/unbound.conf"
 LOG = "/var/log/keaunbound/keaunbound.log"
 

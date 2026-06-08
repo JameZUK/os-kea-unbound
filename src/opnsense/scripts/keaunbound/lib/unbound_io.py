@@ -5,9 +5,12 @@ Hybrid Unbound writer: keeps records both in the running resolver (runtime, via
 unbound-control, for immediate effect) AND in an include file (for persistence
 across Unbound restarts).
 
-The include file (/var/unbound/etc/keaunbound.conf) is pulled in by OPNsense's
-generated unbound.conf via `include: /var/unbound/etc/*.conf`, so records survive
-every Unbound restart with no repopulation needed.
+The include file lives in OPNsense's unbound custom-include SOURCE dir
+(/usr/local/etc/unbound.opnsense.d/keaunbound.conf). On every unbound start,
+start.sh wipes the chroot /var/unbound/etc/ and re-copies *.conf from that source
+dir into it; the generated unbound.conf then pulls them in via
+`include: /var/unbound/etc/*.conf`. Writing the source (not the chroot copy, which
+is rebuilt each start) is what makes records survive Unbound restarts.
 
 The file is the source of truth. After any change we rewrite it atomically and
 then reconcile the running zone for the affected name: local_data_remove (which

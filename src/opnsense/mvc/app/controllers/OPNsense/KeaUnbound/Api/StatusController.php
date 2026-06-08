@@ -18,7 +18,7 @@ use OPNsense\Kea\KeaDdns;
  */
 class StatusController extends ApiControllerBase
 {
-    private const INCLUDE_FILE = '/var/unbound/etc/keaunbound.conf';
+    private const INCLUDE_FILE = '/usr/local/etc/unbound.opnsense.d/keaunbound.conf';
     private const LOGFILE = '/var/log/keaunbound/keaunbound.log';
 
     public function getAction()

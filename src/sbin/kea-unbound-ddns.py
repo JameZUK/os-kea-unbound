@@ -181,7 +181,7 @@ def parse_args(argv):
     p.add_argument("--port", type=int, default=53535)
     p.add_argument("--unbound-conf", default="/var/unbound/unbound.conf")
     p.add_argument("--host-entries", default="/var/unbound/host_entries.conf")
-    p.add_argument("--include-file", default="/var/unbound/etc/keaunbound.conf")
+    p.add_argument("--include-file", default="/usr/local/etc/unbound.opnsense.d/keaunbound.conf")
     p.add_argument("--tsig-name", default="keaunbound")
     p.add_argument("--tsig-secret", default="")
     p.add_argument("--tsig-algorithm", default="hmac-sha256")

@@ -49,7 +49,7 @@ def build_args(gen, domain):
     port = _text(gen, "listener_port", "53535")
     args = [DAEMON, "--port", port,
             "--log-file", LOG_FILE,
-            "--include-file", "/var/unbound/etc/keaunbound.conf",
+            "--include-file", "/usr/local/etc/unbound.opnsense.d/keaunbound.conf",
             "--unbound-conf", "/var/unbound/unbound.conf",
             "--host-entries", "/var/unbound/host_entries.conf"]
     if _text(gen, "aggressive_cleanup", "1") == "1":

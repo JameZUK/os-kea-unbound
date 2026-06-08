@@ -43,7 +43,7 @@ Config::getInstance()->save();
 $backend->configdRun('keaunbound stop');
 
 // 3. flush our records from Unbound, then remove the include file
-$include = '/var/unbound/etc/keaunbound.conf';
+$include = '/usr/local/etc/unbound.opnsense.d/keaunbound.conf';
 if (is_file($include)) {
     $names = [];
     foreach (file($include, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
@@ -57,6 +57,8 @@ if (is_file($include)) {
     }
     @unlink($include);
 }
+// also drop the chroot copy (rebuilt from the source on the next unbound start)
+@unlink('/var/unbound/etc/keaunbound.conf');
 
 // 4. regenerate Kea (injector now no-ops since the plugin is disabled; D2 stops
 //    if we reverted it)
