@@ -109,6 +109,36 @@ computation, hostname handling. Atomic/idempotent file writes.
 
 Phases 0–3 need no router. Phase 4 is the first on-box milestone.
 
+## Thorough test pass (OPNsense 26.1.9 test box)
+
+Every tool/feature exercised on real hardware (see tests/integration/). All green:
+- **Listener (real-time DDNS):** A/AAAA/PTR add, dual-stack preserve on single-family
+  delete, full delete, aggressive cleanup — 10/10.
+- **TSIG security:** unsigned and wrong-key UPDATEs rejected.
+- **Static guard:** host_entries.conf entries never overwritten.
+- **Service:** daemon(8) respawn after crash.
+- **Persistence:** records survive `configctl unbound restart`.
+- **kea_sync injector:** globals injected, per-subnet override stripped, D2 catch-all +
+  TSIG, idempotent, user DDNS preserved.
+- **Static sync:** reservations + leases (control socket).
+- **audit/clean:** stale detected + pruned; reachability-guarded.
+- **Config safety + teardown:** ownership marker record/revert; full clean revert.
+- **Package:** pkg build + clean install + `+PRE_DEINSTALL` teardown on delete.
+- **GUI (Playwright):** Settings + Status render with live data; Sync now works.
+- **Unit:** 25/25.
+
+Three real bugs found and fixed by this pass:
+1. Listener treated every UPDATE as an add (branched on `rdclass`, not dnspython's
+   `.deleting`) — deletes never worked.
+2. TSIG bypass — unsigned UPDATEs were processed when a key was configured.
+3. Persistence — wrote the include to the chroot `/var/unbound/etc/` (wiped on every
+   unbound start); must write the source `/usr/local/etc/unbound.opnsense.d/`.
+
+NOT yet exercised (needs a real DHCP client — the prod step): Kea allocating a live
+lease -> generating an NCR -> D2 -> listener. D2 config + the listener's RFC 2136/TSIG
+handling are both verified; only Kea's own NCR generation is unproven. (Synthetic NCR
+injection isn't viable — Kea's UDP NCR wire format is not raw JSON.)
+
 ### Remaining release steps (need a push / build host)
 - Run the **official `make package`** on an OPNsense plugins tree (the test box has no
   git/plugins tree, so 9 was validated with a hand-built `pkg create` — the package
