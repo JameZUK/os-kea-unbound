@@ -9,3 +9,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+
+# Playwright MCP run artifacts + screenshots
+.playwright-mcp/
+*.png
