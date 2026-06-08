@@ -111,15 +111,24 @@ class Listener:
                 return
             self.zone.remove(name, rtype, rdata)
         elif rtype == "ANY":
-            # Blanket delete of every RRset at the name. unbound-control
-            # local_data_remove drops ALL types at the name, so NEVER touch a name
-            # that holds a static OPNsense record — forward OR reverse — or we wipe
-            # its static A/AAAA/PTR (this clobbered reserved hosts' reverse PTRs).
+            # Blanket "delete all RRsets at this name". unbound-control
+            # local_data_remove drops EVERY type at the name, so:
+            #  * never touch a name holding a static OPNsense record (forward or
+            #    reverse) — that clobbered reserved hosts' records; and
+            #  * for a FORWARD name, never honour it at all: A and AAAA there are
+            #    owned by the separate kea-dhcp4 / kea-dhcp6 servers, and a v6
+            #    removal's name-wide cleanup would wipe the v4 A (and vice versa).
+            #    Kea always issues the specific A/AAAA delete first, so those handle
+            #    real removal; ignoring the blanket cleanup keeps us family-safe.
+            #    A REVERSE name holds a single PTR, so the blanket delete is safe.
             if (guard.is_static_forward(name, "A")
                     or guard.is_static_forward(name, "AAAA")
                     or guard.is_static_ptr(name)):
                 return
-            self.zone.remove(name)
+            if R.is_reverse_name(name):
+                self.zone.remove(name)
+            else:
+                log.info("Ignored name-wide delete for forward %s (family-safe)", name)
 
     # ---- packet handling --------------------------------------------------
     def handle(self, data, addr, sock):

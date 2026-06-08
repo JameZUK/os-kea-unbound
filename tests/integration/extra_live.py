@@ -92,6 +92,33 @@ for tag, ip, fqdn in [
     uc("local_data_remove", ptr)
     open(HE, "w").write(orig_he)
 
+# --- A12 dual-stack forward: a name-wide (ANY) delete must NOT drop the other
+#     family. kea-dhcp4 and kea-dhcp6 write the same FQDN independently, so a v6
+#     removal's name-wide cleanup must not wipe the v4 A (and vice versa). ---
+send("internal.", lambda u: u.add("dual.internal.", 3600, "A", "10.10.10.61"))
+time.sleep(0.3)
+send("internal.", lambda u: u.add("dual.internal.", 3600, "AAAA", "2001:db8::61"))
+time.sleep(0.4)
+check("A12 dual-stack both present before ANY-delete",
+      present("10.10.10.61") and present("2001:db8::61"))
+send("internal.", lambda u: u.delete("dual.internal."))   # name-wide ANY delete
+time.sleep(0.5)
+check("A12 forward ANY-delete keeps A", present("10.10.10.61"))
+check("A12 forward ANY-delete keeps AAAA", present("2001:db8::61"))
+# specific deletes still work (and clean up)
+send("internal.", lambda u: u.delete("dual.internal.", "A", "10.10.10.61"))
+time.sleep(0.3)
+check("A12 specific A delete keeps AAAA", present("2001:db8::61") and not present("10.10.10.61"))
+send("internal.", lambda u: u.delete("dual.internal.", "AAAA", "2001:db8::61"))
+
+# --- A13 a non-static REVERSE PTR must still be removable by an ANY-delete ---
+send("10.10.10.in-addr.arpa.", lambda u: u.add("62.10.10.10.in-addr.arpa.", 3600, "PTR", "revtest.internal."))
+time.sleep(0.4)
+check("A13 reverse PTR present before ANY-delete", present("62.10.10.10.in-addr.arpa."))
+send("10.10.10.in-addr.arpa.", lambda u: u.delete("62.10.10.10.in-addr.arpa."))   # ANY delete
+time.sleep(0.5)
+check("A13 reverse ANY-delete removes PTR", not present("62.10.10.10.in-addr.arpa."))
+
 # --- H daemon(8) respawn after a crash ---
 oldpid = int(open(PIDF).read().strip())
 os.kill(oldpid, 9)
