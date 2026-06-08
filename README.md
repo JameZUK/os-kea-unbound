@@ -1,218 +1,100 @@
-# os-kea-unbound
+# os-kea-unbound (DDNS edition, 0.x)
 
-**Native OPNsense Plugin: Kea DHCP to Unbound DNS Registration**
+**OPNsense plugin: register Kea DHCP leases in Unbound DNS — automatically, with no core-file patching.**
 
-This plugin bridges the gap between the Kea DHCP server (IPv4 & IPv6) and Unbound DNS on OPNsense. It automatically registers hostnames for DHCP clients into the Unbound DNS subsystem, restoring dynamic DNS functionality with robust dual-stack support.
+> This is the rewritten `0.x` line. It replaces the v3.x approach (which patched
+> Kea's MVC/PHP files at install time) with a clean standalone plugin that uses
+> Kea's *native* Dynamic DNS. See `PLAN.md` for the full design and history.
 
-## Features
+When a DHCP client gets a lease, its hostname resolves in Unbound within moments —
+forward (A/AAAA) and reverse (PTR) — and stays resolvable across Unbound restarts.
 
-* **Smart Update Logic:** Intelligently handles dual-stack environments. It preserves existing IPv4 records when adding IPv6 (and vice versa).
-* **Concurrency Safe:** Uses `lockf(1)` serialization to prevent race conditions when concurrent DHCPv4 and DHCPv6 lease events fire for the same host.
-* **Automatic PTR Generation:** Generates reverse DNS (PTR) records for both IPv4 (`in-addr.arpa`) and IPv6 (`ip6.arpa`), with graceful fallback if the PTR computation fails.
-* **Hostname Normalization:** Lowercases hostnames, strips domain suffixes from FQDN inputs, and removes invalid characters to ensure clean DNS entries.
-* **Smart Hostnames:** Automatically generates hostnames from MAC addresses (IPv4) or DUIDs (IPv6) if the client device does not provide one.
-* **Persistence & Repair:** Includes `rc.syshook.d` scripts to ensure patches survive OPNsense firmware updates and system reboots.
-* **Boot Replay:** After a reboot, replays the existing Kea leases into Unbound so DNS is populated immediately instead of waiting for each client to renew. Honors the per-family "Register Leases in Unbound" toggle — if registration is disabled for a family, that family is not replayed.
-* **Status Helper:** Ships a `keaunbound-status` CLI that wraps `unbound-control` against the live config (so you never hit the `control-enable: no` / "connection refused" trap of a bare `unbound-control`).
-* **Bulletproof Install/Uninstall:** Install patches are applied atomically and self-heal via the boot/update repair hooks; uninstall is a true inverse — it strips only the injected blocks (no stale `.bak` restores), scrubs the hook out of the generated Kea config so Kea can never reference a deleted script, and never aborts the package transaction.
-* **Dedicated Logging:** Writes detailed, timestamped activity logs to `/var/log/kea-unbound.log` with automatic rotation via `newsyslog`.
-* **Non-Destructive:** Uses OPNsense's native hook system to inject configuration safely without modifying core system files.
+## How it works
 
-<img width="1804" height="997" alt="Screenshot" src="https://github.com/user-attachments/assets/0bbc7bc4-bd0f-469d-aa2b-1108f91b44f6" />
-
-## Prerequisites
-
-Before installing, ensure the following services are enabled in OPNsense:
-
-1.  **Kea DHCPv4** and/or **Kea DHCPv6**.
-2.  **Unbound DNS**.
-3.  **Python3** (pre-installed on OPNsense) — required for IPv6 reverse PTR generation.
-4.  **Kea Control Agent:** This service **must be enabled** for the plugin to function correctly.
-    * Navigate to **Services > Kea DHCP > Control Agent**.
-    * Enable the service and click **Save**.
-    * Start/Restart the service.
-
-## Installation
-
-### Option 1: Direct Installation (Recommended)
-You can install the pre-compiled package directly via the OPNsense shell (SSH).
-
-1.  Log in to your OPNsense router via SSH.
-2.  Run the following command:
-
-
-```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v3.8.1/os-kea-unbound-3.8.1.pkg
+```
+ kea-dhcp4/6 ─── leases ───► kea-dhcp-ddns (D2) ── RFC 2136 (TSIG) ──► kea-unbound-ddns
+      │                                                                  (127.0.0.1:53535)
+      │ reservations + existing leases (control socket)                        │
+      └──────────────────────────► lease-sync ─────────────────────────► unbound-control
+                                                                                │
+                                                          /var/unbound/etc/keaunbound.conf
+                                                            (persists across restarts)
 ```
 
-*Note: You may see a "misconfigured" warning next to the plugin in the OPNsense web interface. This is cosmetic and expected when installing packages manually outside of a signed repository.*
+- **Real-time path:** Kea's built-in `kea-dhcp-ddns` (D2) sends TSIG-signed RFC 2136
+  updates to a loopback listener, which writes them to Unbound.
+- **Static/initial path:** existing leases (Kea control socket) and reservations
+  (Kea config) are seeded on enable/start so nothing waits for a renewal.
+- **Persistence:** every record is mirrored into `/var/unbound/etc/keaunbound.conf`,
+  which OPNsense's generated `unbound.conf` always `include:`s — so records survive
+  Unbound restarts with no repopulation.
 
-### Option 2: Build from Source
-If you prefer to build the package yourself:
+## What makes it different
 
-1.  Download the `build_plugin.sh` script from this repository.
-2.  Upload the script to your OPNsense router.
-3.  Run the following commands:
+- **No core-file patching.** Nothing edits Kea's models/PHP/templates, so OPNsense
+  upgrades can't break it and uninstall is trivially clean.
+- **Zero per-subnet setup.** DDNS is configured *globally and automatically* — you
+  don't touch each subnet (the usual Kea-DDNS chore).
+- **Auto-provisioned TSIG.** An HMAC-SHA256 key is generated once and wired into both
+  Kea D2 and the listener; on by default.
+- **Config-safe.** The only persistent Kea setting it changes is enabling the DDNS
+  daemon, and only if you didn't already have it on — recorded and reverted on
+  disable/uninstall. It never overwrites an existing user DDNS config (it adds a
+  catch-all alongside). All edits are atomic; changes are logged + announced.
+
+## Requirements
+
+- OPNsense 26.1+ (Kea is the DHCP server; ISC dhcpd is gone)
+- Kea DHCPv4 and/or DHCPv6 enabled, Unbound the active resolver
+- `py313-dnspython` (declared in `PLUGIN_DEPENDS`, installed by `pkg`)
+
+## Install
+
+Build from the OPNsense plugins tree on an OPNsense/FreeBSD host:
 
 ```sh
-chmod +x build_plugin.sh
-./build_plugin.sh
-pkg add ./os-kea-unbound-3.8.1.pkg
+git clone https://github.com/opnsense/plugins /usr/plugins
+git clone https://github.com/JameZUK/os-kea-unbound /usr/plugins/dns/kea-unbound
+cd /usr/plugins/dns/kea-unbound
+make package          # -> work/pkg/os-kea-unbound-0.x.pkg
+pkg add work/pkg/os-kea-unbound-*.pkg
 ```
 
 ## Configuration
 
-Once installed, you must enable the registration feature in the Kea settings.
+**Services → Kea Unbound DDNS → Settings**, tick **Enable**, Save. That's it — the
+plugin enables Kea's DDNS daemon, points it at the listener, generates the TSIG key,
+and seeds existing leases/reservations. Optional:
 
-1.  **IPv4 Configuration:**
-    * Navigate to **Services > Kea DHCP > Kea DHCPv4 > Settings**.
-    * Locate the **General Settings** section.
-    * Tick the checkbox: **Register Leases in Unbound (via os-kea-unbound)**.
-    * Click **Save**.
+| Setting | Default |
+|---|---|
+| Qualifying suffix | the firewall domain |
+| TSIG | on (HMAC-SHA256, auto key) |
+| Listener port | 53535 (loopback) |
+| Aggressive cleanup | on (drop a host's old address when it moves) |
 
-2.  **IPv6 Configuration:**
-    * Navigate to **Services > Kea DHCP > Kea DHCPv6 > Settings**.
-    * Locate the **General Settings** section.
-    * Tick the checkbox: **Register Leases in Unbound (via os-kea-unbound)**.
-    * Click **Save**.
+## Status & maintenance
 
-3.  **Apply Changes:**
-    * Restart **Kea DHCPv4**.
-    * Restart **Kea DHCPv6**.
+- **Services → Kea Unbound DDNS → Status:** listener health, record count, TSIG
+  state, whether the plugin manages Kea's DDNS, recent activity, and a **Sync now**
+  button.
+- CLI (configd):
+  ```sh
+  configctl keaunbound status      # listener state
+  configctl keaunbound sync        # re-seed leases + reservations
+  configctl keaunbound audit       # report drift vs Kea (read-only, JSON)
+  configctl keaunbound clean       # prune stale records Kea no longer knows
+  ```
+- Logs: `/var/log/keaunbound/keaunbound.log` (rotated by newsyslog).
 
-The plugin will immediately begin processing lease events.
+## Uninstall
 
-## Upgrading
-
-To prevent configuration conflicts or service crashes during an upgrade, follow this "Clean Upgrade" procedure.
-
-1.  **Disable Hooks:**
-    * Navigate to **Services > Kea DHCP > Settings**.
-    * **Uncheck** the "Register Leases in Unbound" box and click **Save**.
-    * *This safely detaches the hook from Kea configuration files.*
-
-2.  **Replace Package:**
-    * Log in via SSH and run:
-    ```sh
-    pkg delete os-kea-unbound
-    pkg add ./os-kea-unbound-3.8.1.pkg
-    ```
-
-3.  **Re-Enable Hooks:**
-    * Return to **Services > Kea DHCP > Settings**.
-    * **Check** the "Register Leases in Unbound" box and click **Save**.
-    * Restart the Kea services.
-
-## Troubleshooting & Recovery
-
-If Kea fails to start after an upgrade (e.g., due to a lingering invalid path), use these recovery methods.
-
-### 1. Manual Bypass (CLI)
-If the web interface is inaccessible or Kea is crashing, run these commands via SSH to surgically remove the hook configuration. This will allow Kea to start without the plugin.
-
-```sh
-sed -i '' '/"hooks-libraries"/,/\]/d' /usr/local/etc/kea/kea-dhcp4.conf
-sed -i '' '/"hooks-libraries"/,/\]/d' /usr/local/etc/kea/kea-dhcp6.conf
-service kea-dhcp4 restart
-service kea-dhcp6 restart
-```
-
-### 2. Restore Configuration
-If the OPNsense configuration is corrupted, you can restore a previous backup from the console:
-1.  Access the console (SSH or physical screen).
-2.  Select **Option 13** (Restore a backup).
-3.  Select a configuration timestamped prior to the failed upgrade.
-
-### 3. Factory Reset
-In the event of a total lockout where no other method works:
-1.  Access the console.
-2.  Select **Option 4** (Reset to factory defaults).
-3.  Once the system reboots (default IP: 192.168.1.1), restore your configuration via the Web GUI.
-
-## Verification
-
-### 1. Check the Log File
-Watch the dedicated log file for real-time updates:
-
-```sh
-tail -f /var/log/kea-unbound.log
-```
-*Output Example:*
-```text
-2026-01-19 18:42:05 [info] Added AAAA for client-device.example.com (2001:db8::1001) [PTR: 1.0.0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa]
-2026-01-19 18:42:08 [info] Added A for smart-device.example.com (192.168.1.10) [PTR: 10.1.168.192.in-addr.arpa]
-```
-
-### 2. Run Health Check
-A diagnostic script is provided to validate the installation. It performs 11 checks:
-
-1. OPNsense MVC patches (DHCPv4)
-2. OPNsense MVC patches (DHCPv6)
-3. Active Kea configuration
-4. Hook script (exists and is executable)
-5. Plugin registration (`keaunbound.inc`)
-6. Persistence hooks (update + early-boot repair + start-boot replay)
-7. Log rotation configuration
-8. Unbound connectivity
-9. Python3 availability (required for IPv6 PTR)
-10. `drill` command (required for dual-stack preservation)
-11. `keaunbound-status` helper (exists and is executable)
-
-```sh
-./healthcheck.sh
-```
-
-### 3. Run the Test Suite
-A comprehensive regression test suite (`test_hook.sh`) validates the hook script against a live Unbound instance. It covers:
-
-* IPv4 and IPv6 single-stack lifecycles (add/release)
-* Dual-stack preservation in both orders (v4->v6 and v6->v4)
-* Partial removal (removing one stack preserves the other)
-* Hostname normalization (uppercase, FQDN input, special characters)
-* MAC address fallback when hostname is empty
-
-```sh
-./test_hook.sh
-```
-
-### 4. Query Unbound Directly
-Use the bundled helper, which always targets the live config — no `-c` flag to remember:
-
-```sh
-keaunbound-status            # record count + recent log lines
-keaunbound-status list       # list every registered record
-keaunbound-status find smart-device   # filter by hostname or IP
-keaunbound-status replay     # re-run the boot-time lease replay now
-keaunbound-status help       # full command list
-```
-
-> **Note:** a *bare* `unbound-control list_local_data` reads the compiled-in default config (which has `control-enable: no`) and fails with "connection refused" — it is **not** querying the running resolver. Always pass `-c /var/unbound/unbound.conf`, or just use `keaunbound-status`, which does it for you. The equivalent raw command:
->
-> ```sh
-> unbound-control -c /var/unbound/unbound.conf list_local_data | grep "smart-device"
-> ```
-
-## Uninstallation
-
-To remove the plugin and revert all changes:
-
-```sh
-pkg delete os-kea-unbound
-```
-
-Uninstall is a true inverse and is safe even after an OPNsense upgrade. It:
-
-* strips **only** the blocks the plugin injected into the OPNsense MVC templates (matched by signature, written atomically) — it does **not** restore install-time `.bak` snapshots, which could be stale;
-* scrubs the plugin's `hooks-libraries` entry out of the generated `kea-dhcp4.conf` / `kea-dhcp6.conf`, so Kea can never reference the now-deleted hook script and fail to start;
-* removes the hook script, helper, rotation config, and persistence/replay hooks;
-* best-effort reloads Kea so the change goes live immediately, and never aborts the package transaction if a step fails.
-
-Any DNS records the plugin added to Unbound at runtime are not persisted and clear on the next Unbound restart.
+Disabling the plugin (Settings → untick Enable → Save) fully reverts everything:
+stops the listener, reverts Kea's DDNS daemon if the plugin enabled it, flushes the
+plugin's records, and regenerates a clean Kea config. `pkg delete` does the same via
+a pre-deinstall safety net. Because nothing in core was patched, there is nothing
+else to undo.
 
 ## License
 
-BSD 2-Clause License. See the `LICENSE` file for details.
-
-## Acknowledgements
-
-Based on the discussion and concepts in [OPNsense Core Issue #7475](https://github.com/opnsense/core/issues/7475).
+BSD-2-Clause.

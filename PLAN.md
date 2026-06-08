@@ -104,8 +104,8 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **5 — static sync** (seed existing leases + reservations; control socket primary, CSV fallback, NO KCA needed) — verified on the test box
 - [x] **6 — Status page** (Services → Kea Unbound DDNS → Status: listener health, record count, TSIG, Kea-DDNS ownership, recent log, "Sync now") — data verified on the test box
 - [x] **7 — clean uninstall/teardown** (shared teardown.php: revert Kea DDNS iff owned, stop listener, flush records + remove include file, regenerate clean Kea; wired to the disable path AND a +PRE_DEINSTALL) — verified on the test box
-- [ ] **8 — Audit/clean + logs + docs**
-- [ ] **9 — Tests + release (tag 0.1)**
+- [x] **8 — audit/clean + logs + docs** (lib/kea_source shared source-of-truth; `audit`/`clean` configd actions with a Kea-reachability guard against wiping; newsyslog rotation; README rewritten) — verified on the test box
+- [ ] **9 — Tests + release (tag 0.1)** (package build on a plugins tree; verify +PRE_DEINSTALL at pkg-time; CI; tag)
 
 Phases 0–3 need no router. Phase 4 is the first on-box milestone.
 
