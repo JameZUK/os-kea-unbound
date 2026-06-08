@@ -9,6 +9,7 @@ namespace OPNsense\KeaUnbound\Api;
 
 use OPNsense\Base\ApiControllerBase;
 use OPNsense\Core\Backend;
+use OPNsense\Core\Config;
 use OPNsense\KeaUnbound\General;
 use OPNsense\Kea\KeaDdns;
 
@@ -56,13 +57,26 @@ class StatusController extends ApiControllerBase
         $tsig = (string)$general->general->tsig_enabled === '1'
             ? (string)$general->general->tsig_algorithm : 'off';
 
+        // resolve the effective qualifying suffix: when blank, Kea/D2 falls back
+        // to the firewall's system domain, so surface that actual domain here.
+        $suffix = trim((string)$general->general->qualifying_suffix);
+        $suffixIsDefault = false;
+        if ($suffix === '') {
+            $suffixIsDefault = true;
+            $cfg = Config::getInstance()->object();
+            if (isset($cfg->system->domain)) {
+                $suffix = (string)$cfg->system->domain;
+            }
+        }
+
         return [
             'enabled' => (string)$general->general->enabled,
             'listener_running' => $running,
             'listener_port' => (string)$general->general->listener_port,
             'records' => $records,
             'tsig' => $tsig,
-            'qualifying_suffix' => (string)$general->general->qualifying_suffix,
+            'qualifying_suffix' => $suffix,
+            'qualifying_suffix_is_default' => $suffixIsDefault,
             'kea_ddns_enabled' => (string)$kdns->general->enabled,
             'kea_ddns_managed' => (string)$general->general->manage_kea_ddns,
             'recent_log' => $recent,

@@ -4,6 +4,7 @@
         <KeaUnbound VisibleName="Kea Unbound DDNS" cssClass="fa fa-globe fa-fw">
             <Settings order="10" VisibleName="Settings" url="/ui/keaunbound/general"/>
             <Status order="20" VisibleName="Status" url="/ui/keaunbound/status"/>
+            <Records order="30" VisibleName="Records" url="/ui/keaunbound/records"/>
         </KeaUnbound>
     </Services>
 </menu>

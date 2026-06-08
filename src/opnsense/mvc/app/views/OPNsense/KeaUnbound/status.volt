@@ -15,8 +15,13 @@
             $("#st_port").text(data.listener_port || "");
             $("#st_records").text(data.records);
             $("#st_tsig").text(data.tsig);
-            $("#st_suffix").text(data.qualifying_suffix && data.qualifying_suffix.length
-                ? data.qualifying_suffix : "(firewall domain)");
+            var suffix = data.qualifying_suffix
+                ? $("<div>").text(data.qualifying_suffix).html() : "-";
+            if (data.qualifying_suffix_is_default && data.qualifying_suffix) {
+                suffix += ' <small class="text-muted">(' +
+                    "{{ lang._('firewall domain') }}" + ')</small>';
+            }
+            $("#st_suffix").html(suffix);
             var owned = data.kea_ddns_managed === "1" ? " (managed by this plugin)" : " (pre-existing)";
             $("#st_kea_ddns").html(fmtBool(data.kea_ddns_enabled === "1") +
                 ' <small class="text-muted">' + owned + '</small>');
@@ -49,12 +54,14 @@
             <tr><td>{{ lang._('Kea DDNS daemon') }}</td><td id="st_kea_ddns">-</td></tr>
         </tbody>
     </table>
-    <button class="btn btn-primary" id="syncAct" type="button">
-        <b>{{ lang._('Sync now') }}</b> <i id="syncAct_progress"></i>
-    </button>
-    <span class="text-muted" style="margin-left:1em;">
-        {{ lang._('Re-seed existing Kea leases and reservations into Unbound.') }}
-    </span>
+    <div style="padding: 0.5em 8px 0;">
+        <button class="btn btn-primary" id="syncAct" type="button">
+            <b>{{ lang._('Sync now') }}</b> <i id="syncAct_progress"></i>
+        </button>
+        <span class="text-muted" style="margin-left:1em;">
+            {{ lang._('Re-seed existing Kea leases and reservations into Unbound.') }}
+        </span>
+    </div>
 </div>
 
 <div class="content-box" style="margin-top:1em; padding:1em;">

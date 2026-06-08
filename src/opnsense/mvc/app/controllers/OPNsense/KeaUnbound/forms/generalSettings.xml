@@ -1,36 +1,36 @@
 <form>
     <field>
-        <id>general.enabled</id>
+        <id>general.general.enabled</id>
         <label>Enable</label>
         <type>checkbox</type>
         <help>Enable Kea-to-Unbound DDNS registration. On enable, the plugin turns on Kea's DDNS daemon and configures it automatically — no per-subnet setup required.</help>
     </field>
     <field>
-        <id>general.qualifying_suffix</id>
+        <id>general.general.qualifying_suffix</id>
         <label>Qualifying suffix</label>
         <type>text</type>
         <help>Domain appended to bare hostnames to form FQDNs. Leave blank to use the firewall's domain.</help>
     </field>
     <field>
-        <id>general.aggressive_cleanup</id>
+        <id>general.general.aggressive_cleanup</id>
         <label>Aggressive cleanup</label>
         <type>checkbox</type>
         <help>When a host gets a new address, remove older addresses Kea no longer recognises for that host.</help>
     </field>
     <field>
-        <id>general.tsig_enabled</id>
+        <id>general.general.tsig_enabled</id>
         <label>TSIG authentication</label>
         <type>checkbox</type>
         <help>Authenticate DDNS updates with an auto-generated TSIG key (recommended).</help>
     </field>
     <field>
-        <id>general.tsig_algorithm</id>
+        <id>general.general.tsig_algorithm</id>
         <label>TSIG algorithm</label>
         <type>dropdown</type>
         <advanced>true</advanced>
     </field>
     <field>
-        <id>general.listener_port</id>
+        <id>general.general.listener_port</id>
         <label>Listener port</label>
         <type>text</type>
         <advanced>true</advanced>
