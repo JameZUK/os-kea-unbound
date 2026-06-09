@@ -6,6 +6,12 @@
 # crontab entry. No-ops when the plugin is disabled (clean.py guards on settings).
 [ -x /usr/local/sbin/configctl ] || exit 0
 out=$(/usr/local/sbin/configctl keaunbound clean 2>&1)
+# Leave an audit trail in the plugin log on every run (one line/day), so the daily
+# backstop is observable even on a no-op — otherwise a healthy run leaves no trace.
+if [ -d /var/log/keaunbound ]; then
+    printf '%s [INFO] periodic: daily clean result: %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$out" >> /var/log/keaunbound/keaunbound.log 2>/dev/null
+fi
 # Surface a refusal/error in the daily periodic report rather than hiding it (so a
 # persistently-aborting clean — e.g. Kea unreachable for weeks — is noticed). A
 # normal/no-op run stays quiet. Always exit 0 so periodic doesn't flag a failure.
