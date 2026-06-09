@@ -42,7 +42,15 @@
             // keep the view pinned to the bottom (live tail) only if the user is
             // already there — don't yank them down while reading older lines.
             var atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 40;
-            $(el).text(lines.length ? lines.join("\n") : "(no activity logged yet)");
+            // The API HTML-escapes its string output (& < > " ' arrive as entities),
+            // which would otherwise show literally (e.g. "injection -&gt;"). Reverse
+            // htmlspecialchars explicitly — &amp; LAST so "&amp;gt;" can't double-decode
+            // — then render via .text() (textContent), which is XSS-safe regardless.
+            var raw = lines.length ? lines.join("\n") : "(no activity logged yet)";
+            var decoded = raw.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+                             .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'")
+                             .replace(/&amp;/g, "&");
+            $(el).text(decoded);
             if (atBottom) { el.scrollTop = el.scrollHeight; }
             $("#st_log_info").text(lines.length + " line" + (lines.length === 1 ? "" : "s") +
                 " shown" + (data.more ? " — more available" : ""));

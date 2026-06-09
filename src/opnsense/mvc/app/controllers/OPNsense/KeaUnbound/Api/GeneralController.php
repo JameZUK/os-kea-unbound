@@ -45,7 +45,19 @@ class GeneralController extends ApiMutableModelControllerBase
             // TSIG key exists before validation/save so it is persisted in the
             // same transaction.
             $mdl = $this->getModel();
+            // Internal, plugin-managed fields are deliberately excluded from the form
+            // and must never be settable via a crafted POST: manage_kea_ddns is the
+            // ownership marker teardown keys off (flipping it could make teardown wrongly
+            // revert — or fail to revert — the user's Kea DDNS daemon), and
+            // tsig_key_secret is auto-provisioned/write-once (a posted value could weaken
+            // or replace the key). Snapshot both, apply posted nodes, then restore them.
+            $ownedMarker = (string)$mdl->general->manage_kea_ddns;
+            $storedSecret = (string)$mdl->general->tsig_key_secret;
+            $storedKeyName = (string)$mdl->general->tsig_key_name;
             $mdl->setNodes($this->request->getPost(static::$internalModelName));
+            $mdl->general->manage_kea_ddns = $ownedMarker;
+            $mdl->general->tsig_key_secret = $storedSecret;
+            $mdl->general->tsig_key_name = $storedKeyName;
             $mdl->ensureTsigKey();
             $result = $this->validate($mdl, '', true);
             if ($result['result'] == 'failed') {

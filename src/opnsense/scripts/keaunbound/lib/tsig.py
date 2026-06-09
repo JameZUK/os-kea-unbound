@@ -18,6 +18,21 @@ def algorithm_name(algo: str) -> str:
     return _ALGO_MAP.get((algo or "").lower(), "hmac-sha256")
 
 
+def algo_matches(got, want) -> bool:
+    """True if an inbound TSIG algorithm should be ACCEPTED given the configured one.
+
+    Normalises both (drop trailing dot, lowercase) and compares. A verified TSIG
+    message always carries an algorithm, so an EMPTY inbound algorithm is rejected
+    (fail closed — don't let a missing/odd algorithm bypass the pin). Only an empty
+    configured `want` is tolerated (it's always set in practice). Pure +
+    dnspython-free so the listener's algorithm pin is unit-testable."""
+    w = str(want or "").rstrip(".").lower()
+    if not w:
+        return True  # nothing configured to pin against
+    g = str(got or "").rstrip(".").lower()
+    return g == w    # empty/unknown inbound algorithm -> reject
+
+
 def build_keyring(key_name: str, secret_b64: str):
     """
     Build a dnspython keyring for verifying inbound and signing outbound TSIG.

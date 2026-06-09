@@ -112,8 +112,28 @@ def leases_csv(family):
     return [(r.get("hostname", ""), addr) for addr, r in seen.items() if r.get("hostname")]
 
 
-def leases(family):
-    """(hostname, ip) for active leases via control socket, CSV fallback."""
+# A memfile CSV persists on disk after Kea stops, so its mere existence is not
+# evidence Kea is current. Trust it as a lease source only if it was written
+# recently (Kea rewrites it on lease changes / LFC while running).
+CSV_MAX_AGE = 1800  # seconds
+
+
+def _csv_fresh(family):
+    path = CSV4 if family == "4" else CSV6
+    try:
+        delta = time.time() - os.path.getmtime(path)
+    except OSError:
+        return False
+    return 0 <= delta < CSV_MAX_AGE  # a future mtime (clock skew) is not "fresh"
+
+
+def _family_leases(family):
+    """One lease query for a family -> (leases, source_ok).
+
+    source_ok is True only when the list is AUTHORITATIVE: a successful
+    control-socket reply, or (socket down) a CSV that exists and is fresh. Because a
+    SINGLE fetch yields both the list and the flag, a caller can never confirm a
+    family from one query while reading records from a different (divergent) one."""
     cmd = "lease4-get-all" if family == "4" else "lease6-get-all"
     svc = "dhcp4" if family == "4" else "dhcp6"
     resp = kea_ctrl.send_command(cmd, service=svc)
@@ -127,29 +147,20 @@ def leases(family):
             host, addr = lease.get("hostname"), lease.get("ip-address")
             if host and addr:
                 out.append((host, addr))
-        return out
-    return leases_csv(family)
+        return out, True
+    if _csv_fresh(family):
+        return leases_csv(family), True
+    return [], False
 
 
-# A memfile CSV persists on disk after Kea stops, so its mere existence is not
-# evidence Kea is current. Trust it as a lease source only if it was written
-# recently (Kea rewrites it on lease changes / LFC while running).
-CSV_MAX_AGE = 1800  # seconds
+def leases(family):
+    """(hostname, ip) for active leases via control socket, fresh-CSV fallback."""
+    return _family_leases(family)[0]
 
 
 def lease_source_ok(family):
-    """True if we have an *authoritative* current lease list for this family this
-    run: a live control-socket answer, or a CSV that exists and is fresh. Lets
-    clean prune a family's records only when that family's source is trustworthy."""
-    svc = "dhcp4" if family == "4" else "dhcp6"
-    resp = kea_ctrl.send_command("status-get", service=svc)
-    if isinstance(resp, dict) and resp.get("result") == 0:
-        return True
-    path = CSV4 if family == "4" else CSV6
-    try:
-        return (time.time() - os.path.getmtime(path)) < CSV_MAX_AGE
-    except OSError:
-        return False
+    """True if we have an authoritative current lease list for this family this run."""
+    return _family_leases(family)[1]
 
 
 def kea_reachable():
@@ -158,6 +169,26 @@ def kea_reachable():
     Guards clean from wiping everything when Kea is merely unreachable (a stale
     leftover CSV no longer counts — see lease_source_ok)."""
     return any(lease_source_ok(fam) for fam in ("4", "6"))
+
+
+def clean_inputs():
+    """For clean: per family, the set of current dynamic-lease IPs (normalised,
+    reservations excluded) and whether that family's source was authoritative this
+    run — all from a SINGLE lease query per family (no double-fetch / TOCTOU).
+    Returns (live_ips_by_family, prunable_by_family)."""
+    live = {"4": set(), "6": set()}
+    prunable = {"4": False, "6": False}
+    for fam in ("4", "6"):
+        resv, resv_ok = _reserved_for_family(fam)
+        leases_list, source_ok = _family_leases(fam)
+        prunable[fam] = source_ok and resv_ok
+        if not resv_ok:
+            continue
+        for _host, ip in leases_list:
+            n = R._norm_ip(ip)
+            if n is not None and n not in resv:
+                live[fam].add(n)
+    return live, prunable
 
 
 def _reserved_for_family(fam):
@@ -169,16 +200,6 @@ def _reserved_for_family(fam):
         return R.reserved_ips_from_config(path), True
     except R.ReservedConfigError:
         return set(), False
-
-
-def reserved_ips():
-    """Canonical set of all Kea-reserved IPs (v4 + v6). Tolerant: a momentarily
-    unreadable config contributes nothing rather than raising."""
-    s = set()
-    for fam in ("4", "6"):
-        ips, _ = _reserved_for_family(fam)
-        s |= ips
-    return s
 
 
 def desired_records(suffix):

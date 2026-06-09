@@ -4,6 +4,9 @@ work/
 # Built packages
 *.pkg
 
+# Local tooling / session data
+.claude/
+
 # Python
 __pycache__/
 *.pyc

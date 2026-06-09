@@ -9,18 +9,17 @@ namespace OPNsense\KeaUnbound;
 
 use OPNsense\Base\IndexController as BaseIndexController;
 
+/**
+ * Module default controller — only the bare /ui/keaunbound/ URL resolves here
+ * (OPNsense routing: path element 1 = controller, element 2 = action). The real
+ * pages are served by their own controllers, each reached at /ui/keaunbound/<name>:
+ *   - GeneralController  -> Settings  (/ui/keaunbound/general)
+ *   - StatusController   -> Status    (/ui/keaunbound/status)
+ *   - RecordsController  -> Records   (/ui/keaunbound/records)
+ * The menu (Menu/Menu.xml) links to those, never to the bare URL, so no action is
+ * defined here. (The earlier generalAction/statusAction were unreachable dead
+ * duplicates of GeneralController/StatusController and have been removed.)
+ */
 class IndexController extends BaseIndexController
 {
-    public function generalAction()
-    {
-        $this->view->title = gettext('Kea Unbound DDNS');
-        $this->view->generalForm = $this->getForm('generalSettings');
-        $this->view->pick('OPNsense/KeaUnbound/index');
-    }
-
-    public function statusAction()
-    {
-        $this->view->title = gettext('Kea Unbound DDNS - Status');
-        $this->view->pick('OPNsense/KeaUnbound/status');
-    }
 }

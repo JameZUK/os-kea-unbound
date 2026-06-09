@@ -52,7 +52,7 @@
                 <th data-column-id="subnet" data-sortable="true" data-width="6em" data-formatter="esc">{{ lang._('Subnet') }}</th>
                 <th data-column-id="source" data-sortable="true" data-width="8em" data-formatter="esc">{{ lang._('Source') }}</th>
                 <th data-column-id="expires" data-sortable="true" data-formatter="expires">{{ lang._('Expires') }}</th>
-                <th data-column-id="ttl" data-sortable="true" data-type="numeric" data-width="5em">{{ lang._('TTL') }}</th>
+                <th data-column-id="ttl" data-sortable="true" data-type="numeric" data-width="5em" data-formatter="esc">{{ lang._('TTL') }}</th>
             </tr>
         </thead>
         <tbody></tbody>

@@ -44,12 +44,16 @@ def main():
     if settings is None:
         print("keaunbound: disabled — no lease sync")
         return 0
-    zone = UnboundZone(include_file=INCLUDE_FILE, unbound_conf=UNBOUND_CONF,
-                       logger=lambda level, msg: None)
     # Guard on host_entries.conf AND Kea reservations so we never seed (or later
     # touch) an OPNsense-owned static/reserved name. desired_records is already
     # dynamic-only; this is defence in depth for the host_entries case.
     guard = R.StaticGuard(HOST_ENTRIES, [kea_source.KEA4, kea_source.KEA6])
+    # static_provider re-asserts a co-located OPNsense static record (a forward AAAA
+    # or a reverse PTR) into the running zone after the reconcile's blanket
+    # local_data_remove, so seeding a dynamic record for the same name can't evict it.
+    zone = UnboundZone(include_file=INCLUDE_FILE, unbound_conf=UNBOUND_CONF,
+                       logger=lambda level, msg: None,
+                       static_provider=lambda name: guard.static_records(name))
     count = 0
     for rec in kea_source.desired_records(settings["suffix"]):
         if rec.rtype == "PTR":

@@ -40,9 +40,14 @@ LOG = "/var/log/keaunbound/keaunbound.log"
 CATCHALL_FWD = "."
 CATCHALL_REV = ("in-addr.arpa.", "ip6.arpa.")
 
+# Only the algorithms the GUI offers and the listener verifies (lib/tsig.py). Keep
+# this in lock-step with tsig._ALGO_MAP: if D2 were told to sign with an algorithm
+# the listener doesn't accept, the listener's algorithm-pin would drop every NCR.
+# Anything else falls back to HMAC-SHA256 (matching the listener's default).
 KEA_ALGO = {
-    "hmac-md5": "HMAC-MD5", "hmac-sha1": "HMAC-SHA1", "hmac-sha224": "HMAC-SHA224",
-    "hmac-sha256": "HMAC-SHA256", "hmac-sha384": "HMAC-SHA384", "hmac-sha512": "HMAC-SHA512",
+    "hmac-sha1": "HMAC-SHA1",
+    "hmac-sha256": "HMAC-SHA256",
+    "hmac-sha512": "HMAC-SHA512",
 }
 
 

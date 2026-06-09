@@ -16,12 +16,14 @@ Do not run directly in production — it is supervised by daemon(8) via the
 """
 
 import argparse
+import ipaddress
 import logging
 import logging.handlers
 import os
 import signal
 import socket
 import sys
+import time
 
 # Make lib/ importable whether installed (/usr/local/opnsense/scripts/keaunbound)
 # or run from a source checkout (../opnsense/scripts/keaunbound relative to sbin).
@@ -33,9 +35,19 @@ for _cand in (_SCRIPTS,
         break
 
 from lib import records as R          # noqa: E402
+from lib import tsig                   # noqa: E402 (module import is dnspython-free)
 from lib.unbound_io import UnboundZone  # noqa: E402
 
 log = logging.getLogger("keaunbound")
+
+
+def _is_loopback(addr):
+    """True if addr is a loopback address (127.0.0.0/8 or ::1). Anything we can't
+    parse is treated as non-loopback (fail safe)."""
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
 
 
 class StaticGuardCache:
@@ -68,20 +80,47 @@ class StaticGuardCache:
 class Listener:
     def __init__(self, args):
         self.args = args
+        self.guard = StaticGuardCache(args.host_entries, args.kea_conf)
         self.zone = UnboundZone(
             include_file=args.include_file,
             unbound_conf=args.unbound_conf,
             logger=lambda level, msg: getattr(log, level, log.info)(msg),
+            # Re-assert OPNsense static records (forward A/AAAA or reverse PTR) of a
+            # co-located name after the runtime reconcile's blanket remove — prevents
+            # evicting e.g. a static AAAA when we write a dynamic A for the same host,
+            # or a reserved PTR when aggressive cleanup reconciles a stale IP's reverse.
+            static_provider=lambda name: self.guard.get().static_records(name),
         )
-        self.guard = StaticGuardCache(args.host_entries, args.kea_conf)
         self.keyring = None
         self.keyname = None
         self.keyalgo = None
-        if not args.no_tsig and args.tsig_secret:
-            from lib import tsig
-            self.keyring = tsig.build_keyring(args.tsig_name, args.tsig_secret)
+        # Prefer the secret from the environment (start.py passes it there, not in
+        # argv, so it isn't exposed via ps(1)); fall back to --tsig-secret for tests.
+        self.tsig_required = not args.no_tsig
+        secret = args.tsig_secret or os.environ.get("KEAUNBOUND_TSIG_SECRET", "")
+        if self.tsig_required:
+            # FAIL CLOSED: if TSIG is required but no secret is available, refuse to
+            # run rather than accept unsigned updates (a missing secret must never
+            # silently downgrade to accept-all — the listener owns this invariant,
+            # not the caller).
+            if not secret:
+                log.critical("TSIG required but no secret provided "
+                             "(KEAUNBOUND_TSIG_SECRET unset / --tsig-secret empty); "
+                             "refusing to start")
+                raise SystemExit(78)  # EX_CONFIG
+            self.keyring = tsig.build_keyring(args.tsig_name, secret)
             self.keyname = args.tsig_name if args.tsig_name.endswith(".") else args.tsig_name + "."
             self.keyalgo = tsig.algorithm_name(args.tsig_algorithm)
+        else:
+            # --no-tsig is a test-only escape hatch. On a non-loopback bind it would
+            # expose an unauthenticated DNS-write surface to the network, so refuse it
+            # there (fail closed); only allow it on loopback, and even then say so loudly.
+            if not _is_loopback(args.bind):
+                log.critical("--no-tsig refused on non-loopback bind %s (would accept "
+                             "unauthenticated UPDATEs); refusing to start", args.bind)
+                raise SystemExit(78)  # EX_CONFIG
+            log.warning("TSIG DISABLED (--no-tsig): accepting UNSIGNED UPDATEs on %s",
+                        args.bind)
         self._running = True
 
     # ---- record operations -----------------------------------------------
@@ -166,13 +205,11 @@ class Listener:
         # Pin the algorithm. from_wire already pins the key *name* (the keyring holds
         # only our key), but a sender holding the secret could still present a valid
         # MAC under a weaker/other algorithm than we configured — reject that.
-        if self.keyring is not None:
-            got = str(getattr(msg, "keyalgorithm", "") or "").rstrip(".").lower()
-            want = (self.keyalgo or "").rstrip(".").lower()
-            if got and want and got != want:
-                log.warning("Dropped UPDATE from %s (TSIG algorithm %s != %s)",
-                            addr, got, want)
-                return
+        if self.keyring is not None and not tsig.algo_matches(
+                getattr(msg, "keyalgorithm", ""), self.keyalgo):
+            log.warning("Dropped UPDATE from %s (TSIG algorithm %s != %s)",
+                        addr, getattr(msg, "keyalgorithm", ""), self.keyalgo)
+            return
 
         # Acknowledge FIRST, then apply. We don't do RFC 2136 prerequisite-based
         # conflict resolution (we own the zone) and always reply NOERROR, so there
@@ -216,7 +253,24 @@ class Listener:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         except OSError:
             pass
-        sock.bind((self.args.bind, self.args.port))
+        # bind() can transiently fail with EADDRINUSE when start does stop-then-spawn
+        # and the previous child hasn't fully released the port yet. Retry briefly
+        # (SO_REUSEADDR is set) instead of exiting into the daemon(8) respawn loop —
+        # that silent exit-and-respawn was the "configd start flake". The total budget
+        # (6 x 0.5s = 3s) is kept under start.py's _spawn_and_verify timeout (5s) so a
+        # bind that's going to succeed does so before the verifier gives up.
+        for attempt in range(6):
+            try:
+                sock.bind((self.args.bind, self.args.port))
+                break
+            except OSError as exc:
+                if attempt == 5:
+                    log.critical("bind %s:%d failed after retries: %s",
+                                 self.args.bind, self.args.port, exc)
+                    raise
+                log.warning("bind %s:%d busy (%s); retrying", self.args.bind,
+                            self.args.port, exc)
+                time.sleep(0.5)
         sock.settimeout(1.0)
         log.info("Listening on %s:%d (tsig=%s)", self.args.bind, self.args.port,
                  "on" if self.keyring else "off")

@@ -19,13 +19,20 @@ def test_ptr_name_v4_v6():
 
 def test_host_fqdn():
     assert R.host_fqdn("Laptop", "home.lan") == "laptop.home.lan."
-    # a multi-label hostname is already qualified -> used verbatim (matches the
-    # FQDN the live DDNS path writes), NOT relabelled to first-label + suffix.
+    # a multi-label hostname is already qualified -> kept as the FQDN the live DDNS
+    # path writes (normal labels unchanged), NOT relabelled to first-label + suffix.
     assert R.host_fqdn("host.sub.example", "home.lan") == "host.sub.example."
     assert R.host_fqdn("server.corp.com.", "home.lan") == "server.corp.com."
-    assert R.host_fqdn("we!rd_chars", "home.lan") == "werdchars.home.lan."
+    # underscore is preserved (common in client names, kept by Kea); other junk dropped
+    assert R.host_fqdn("we!rd_chars", "home.lan") == "werd_chars.home.lan."
+    assert R.host_fqdn("café", "home.lan") == "caf.home.lan."  # non-ASCII dropped
     assert R.host_fqdn("", "home.lan") == ""
     assert R.host_fqdn("x", "") == "x."
+    # multi-label names are sanitised PER LABEL too: a stray quote/space can't reach
+    # the quoted local-data line / unbound-control input (was verbatim before).
+    assert R.host_fqdn('a"b.lan', "home.lan") == "ab.lan."     # quote stripped
+    assert R.host_fqdn("a b.lan", "home.lan") == "ab.lan."     # space stripped
+    assert R.host_fqdn("a..b.lan", "home.lan") == ""           # empty label -> drop
 
 
 def test_norm_ip_zone_and_mapped():
@@ -171,3 +178,32 @@ def test_reservation_guard_no_kea_paths(tmp_path):
     g = R.StaticGuard(str(tmp_path / "host_entries.conf"))
     assert not g.is_reserved_addr("10.10.3.20")
     assert not g.is_reserved_ptr("20.3.10.10.in-addr.arpa.")
+
+
+def test_forward_records_returns_static_for_reassert(tmp_path):
+    # StaticGuard must hand back the full static forward Records at a name (so the
+    # runtime reconcile can re-assert a co-located static record of a different
+    # family than the dynamic one being written).
+    he = tmp_path / "he.conf"
+    he.write_text('local-data: "host.lan. 3600 IN AAAA 2001:db8::5"\n'
+                  'local-data: "host.lan. 3600 IN A 10.0.0.5"\n'
+                  'local-data: "other.lan. 3600 IN A 10.0.0.9"\n'
+                  'local-data-ptr: "10.0.0.5 3600 host.lan"\n')
+    g = R.StaticGuard(str(he))
+    recs = g.forward_records("HOST.LAN")          # case/dot-insensitive lookup
+    assert sorted(r.rtype for r in recs) == ["A", "AAAA"]
+    assert {r.rdata for r in recs} == {"10.0.0.5", "2001:db8::5"}
+    assert g.forward_records("missing.lan.") == []   # PTR not returned as forward
+
+
+def test_static_records_includes_reverse_ptr(tmp_path):
+    # static_records must return reverse PTR statics too (so the reconcile can
+    # re-assert a co-located reserved/static PTR after a blanket remove).
+    he = tmp_path / "he.conf"
+    he.write_text('local-data: "host.lan. 3600 IN A 10.0.0.5"\n'
+                  'local-data-ptr: "10.0.0.5 3600 host.lan"\n')
+    g = R.StaticGuard(str(he))
+    rev = g.static_records(R.ptr_name("10.0.0.5"))
+    assert len(rev) == 1 and rev[0].rtype == "PTR"
+    fwd = g.static_records("host.lan.")
+    assert any(r.rtype == "A" for r in fwd) and all(r.rtype != "PTR" for r in fwd)

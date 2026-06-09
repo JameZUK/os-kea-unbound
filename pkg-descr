@@ -1,12 +1,16 @@
 Kea DHCP to Unbound DNS registration (DDNS edition)
 
-Automatically registers Kea DHCP leases and static reservations in the Unbound
-DNS resolver so hostnames resolve as soon as a lease is issued.
+Automatically registers DYNAMIC Kea DHCP leases in the Unbound DNS resolver
+(forward A/AAAA + reverse PTR) so hostnames resolve as soon as a lease is issued.
+DHCP reservations and Unbound Host Overrides are left to OPNsense — this plugin
+only adds the dynamic-lease DNS that Kea + Unbound do not do natively.
 
 This edition uses Kea's native Dynamic DNS output (kea-dhcp-ddns) feeding a
 loopback RFC 2136 listener that writes records to Unbound. It does NOT patch any
 of OPNsense's Kea MVC/PHP files: DDNS is configured globally and automatically,
 TSIG authentication is auto-provisioned, and records persist across Unbound
 restarts via an include file.
+
+Requires OPNsense 26.1+ with Kea DHCP (v4 and/or v6) and Unbound as the resolver.
 
 WWW: https://github.com/JameZUK/os-kea-unbound

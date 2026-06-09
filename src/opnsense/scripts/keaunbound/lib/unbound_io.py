@@ -47,12 +47,17 @@ def default_runner(unbound_conf):
 
 class UnboundZone:
     def __init__(self, include_file, unbound_conf="/var/unbound/unbound.conf",
-                 runner=None, lock_path=None, logger=None):
+                 runner=None, lock_path=None, logger=None, static_provider=None):
         self.include_file = include_file
         self.unbound_conf = unbound_conf
         self.runner = runner if runner is not None else default_runner(unbound_conf)
         self.lock_path = lock_path or (include_file + ".lock")
         self.logger = logger or (lambda level, msg: None)
+        # Optional callback name -> [Record]: OPNsense-owned static records that must
+        # be re-asserted into the running zone after the blanket local_data_remove in
+        # _reconcile_runtime (they aren't in our file, so reconcile would otherwise
+        # evict a co-located static record of a different family). Default: none.
+        self.static_provider = static_provider or (lambda name: [])
         self._records = []  # list[Record]
         self._load()
 
@@ -73,16 +78,25 @@ class UnboundZone:
         # preserve the existing file's permissions (mkstemp creates 0600, which
         # would silently drop read access on every rewrite); default to 0644.
         try:
-            mode = os.stat(self.include_file).st_mode & 0o777
+            st = os.stat(self.include_file)
+            mode = st.st_mode & 0o777
         except OSError:
-            mode = 0o644
+            st, mode = None, 0o644
         fd, tmp = tempfile.mkstemp(dir=d)
         try:
             with os.fdopen(fd, "w") as fh:
                 fh.write(data)
                 fh.flush()
                 os.fsync(fh.fileno())  # data on disk before the rename
+            # chmod must succeed (a failure here would leave the new file at
+            # mkstemp's 0600 and silently break Unbound's chroot copy) — let it
+            # abort the write so the old file is kept. chown is best-effort.
             os.chmod(tmp, mode)
+            if st is not None and os.geteuid() == 0:
+                try:
+                    os.chown(tmp, st.st_uid, st.st_gid)  # preserve owner, not just mode
+                except OSError:
+                    pass
             os.replace(tmp, self.include_file)
             # fsync the directory so the rename itself is durable (no 0-byte
             # include file surviving a crash/power-loss).
@@ -117,8 +131,18 @@ class UnboundZone:
         if rc != 0:
             self.logger("error", "local_data_remove %s failed: %s" % (name, out.strip()))
         recs = self._records_for(name)
-        if recs:
-            data = "".join(r.control_args()[0] + "\n" for r in recs)
+        # Re-assert OPNsense-owned static records co-located at this name that the
+        # blanket remove just evicted from the running zone (e.g. a static AAAA when
+        # we wrote a dynamic A for the same host). They're not in our file, so without
+        # this they'd disappear from runtime until the next Unbound reload.
+        have = {r.key() for r in recs}
+        try:
+            extra = [r for r in self.static_provider(name) if r.key() not in have]
+        except Exception:  # noqa: BLE001 - provider is best-effort, never break reconcile
+            extra = []
+        all_recs = recs + extra
+        if all_recs:
+            data = "".join(r.control_args()[0] + "\n" for r in all_recs)
             rc, out = self.runner(["local_datas"], input=data)
             if rc != 0:
                 self.logger("error", "local_datas for %s failed: %s" % (name, out.strip()))

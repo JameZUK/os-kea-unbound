@@ -14,6 +14,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -55,9 +56,13 @@ def build_args(gen, domain):
             "--host-entries", "/var/unbound/host_entries.conf"]
     if _text(gen, "aggressive_cleanup", "1") == "1":
         args.append("--aggressive-cleanup")
-    if _text(gen, "tsig_enabled", "1") == "1" and _text(gen, "tsig_key_secret"):
+    if _text(gen, "tsig_enabled", "1") == "1":
+        # TSIG is REQUIRED whenever the user enabled it — independent of whether a
+        # secret is present. The secret travels via the environment (tsig_secret_env),
+        # NOT argv (argv is world-readable via ps(1) / /proc/<pid>/cmdline). If the
+        # secret is somehow missing, the listener fails closed rather than silently
+        # accepting unsigned updates — so we must NOT fall back to --no-tsig here.
         args += ["--tsig-name", _text(gen, "tsig_key_name", "keaunbound"),
-                 "--tsig-secret", _text(gen, "tsig_key_secret"),
                  "--tsig-algorithm", _text(gen, "tsig_algorithm", "hmac-sha256")]
     else:
         args.append("--no-tsig")
@@ -66,6 +71,60 @@ def build_args(gen, domain):
     # the default (firewall domain) is visible in logs/diagnostics.
     _ = _text(gen, "qualifying_suffix") or domain
     return args
+
+
+def tsig_secret_env(gen):
+    """Build the subprocess environment carrying the TSIG secret out-of-band (not in
+    argv). The daemon(8) wrapper inherits it and the listener reads it from the env."""
+    env = dict(os.environ)
+    if _text(gen, "tsig_enabled", "1") == "1" and _text(gen, "tsig_key_secret"):
+        env["KEAUNBOUND_TSIG_SECRET"] = _text(gen, "tsig_key_secret")
+    else:
+        env.pop("KEAUNBOUND_TSIG_SECRET", None)
+    return env
+
+
+def _log(msg):
+    line = "%s [INFO] start: %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    print("keaunbound: " + msg)
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _spawn(gen, domain):
+    args = build_args(gen, domain)
+    cmd = ["/usr/sbin/daemon", "-f", "-r", "-R", "5",
+           "-p", PIDFILE, "-P", SUPERVISOR_PID,
+           "/usr/local/bin/python3"] + args
+    subprocess.run(cmd, env=tsig_secret_env(gen), check=False)
+
+
+def _listener_up():
+    """True iff the pidfile names a live process that is actually our listener."""
+    try:
+        with open(PIDFILE) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+    return stopper._is_ours(pid)
+
+
+def _spawn_and_verify(gen, domain, timeout=5.0):
+    """Spawn the supervised listener and confirm it actually bound. daemon(8) -f
+    forks and returns immediately, so a bad bind / fail-closed exit / configd race
+    leaves nothing running with no error — poll for the pidfile to materialise and
+    name a live listener of ours before declaring success."""
+    _spawn(gen, domain)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _listener_up():
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def main():
@@ -80,18 +139,25 @@ def main():
         gen, domain = load_settings()
         if gen is None or _text(gen, "enabled") != "1":
             # Not enabled: make sure nothing is running and exit cleanly.
-            stopper.stop()
+            stopper.stop(_locked=True)  # we already hold start.lock
             return 0
         # Idempotent: stop any existing instance before (re)starting.
-        stopper.stop()
-        args = build_args(gen, domain)
-        cmd = ["/usr/sbin/daemon", "-f", "-r", "-R", "5",
-               "-p", PIDFILE, "-P", SUPERVISOR_PID,
-               "/usr/local/bin/python3"] + args
-        subprocess.run(cmd, check=False)
+        stopper.stop(_locked=True)  # we already hold start.lock
+        started = _spawn_and_verify(gen, domain)
+        if not started:
+            # Observed configd-start flake: the spawn occasionally leaves no bound
+            # listener. A clean respawn under the same lock reliably recovers it.
+            # (A genuine fail-closed — TSIG required, no secret — will also land here
+            # and stay down, which is the correct outcome; we surface it as non-zero.)
+            _log("listener not up after spawn — retrying once")
+            stopper.stop(_locked=True)
+            started = _spawn_and_verify(gen, domain)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
+    if not started:
+        _log("ERROR: listener failed to start (no bound listener after retry)")
+        return 1
     # Seed existing leases/reservations so DNS is populated immediately rather than
     # waiting for the next DDNS event. Best-effort; never blocks the listener start.
     sync = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lease-sync.py")

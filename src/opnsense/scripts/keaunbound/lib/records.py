@@ -39,9 +39,26 @@ def host_fqdn(hostname: str, suffix: str) -> str:
     raw = (hostname or "").strip().lower().rstrip(".")
     if not raw:
         return ""
+
+    # Keep only the chars Kea would have kept so this matches the name the live DDNS
+    # path writes: ASCII letters/digits/hyphen and underscore (common in DHCP client
+    # names, preserved by Kea); drop the rest (non-ASCII would be punycoded on the
+    # wire and can't be reconstructed here). Crucially this also strips a stray '"' or
+    # whitespace from an unsanitised lease/reservation hostname — writing those
+    # verbatim would corrupt the quoted local-data line and the unbound-control input.
+    def _san(part):
+        return "".join(c for c in part if (c.isascii() and c.isalnum()) or c in "-_")
+
     if "." in raw:
-        return fqdn(raw)
-    label = "".join(c for c in raw if c.isalnum() or c == "-")
+        # Already-qualified (multi-label) name: sanitise EACH label the same way as a
+        # single label. Normal names are unchanged (so the sync/clean "desired" name
+        # still matches the live path); a label emptied by sanitisation means the name
+        # isn't usable, so drop it entirely.
+        labels = [_san(p) for p in raw.split(".")]
+        if any(not lab for lab in labels):
+            return ""
+        return fqdn(".".join(labels))
+    label = _san(raw)
     if not label:
         return ""
     suffix = (suffix or "").strip().strip(".")
@@ -199,7 +216,9 @@ class StaticGuard:
 
     def __init__(self, host_entries_path: str, kea_paths=()):
         self._fwd = set()        # (name, type) from host_entries.conf
+        self._fwd_recs = {}      # name -> [Record] (full static forward records)
         self._ptr = set()        # ptr name from host_entries.conf
+        self._ptr_recs = {}      # ptr name -> [Record] (full static PTR records)
         self._reserved = set()   # canonical reserved IPs (Kea reservations)
         self._reserved_ptr = set()  # ptr names for reserved IPs
         try:
@@ -207,8 +226,10 @@ class StaticGuard:
                 for rec in parse_local_data_lines(fh.read()):
                     if rec.rtype == "PTR":
                         self._ptr.add(rec.name)
+                        self._ptr_recs.setdefault(rec.name, []).append(rec)
                     else:
                         self._fwd.add((rec.name, rec.rtype))
+                        self._fwd_recs.setdefault(rec.name, []).append(rec)
         except OSError:
             pass  # no static entries / file absent
         for path in kea_paths:
@@ -227,6 +248,28 @@ class StaticGuard:
 
     def is_static_forward(self, name: str, rtype: str) -> bool:
         return (fqdn(name), rtype.upper()) in self._fwd
+
+    def forward_records(self, name: str):
+        """Full static forward Records (A/AAAA from host_entries.conf) at this name.
+
+        Lets the runtime reconcile re-assert a co-located static record of a
+        DIFFERENT family than the dynamic one being written — otherwise the blanket
+        local_data_remove during reconcile evicts e.g. a static AAAA from the running
+        resolver when we write a dynamic A for the same host (until the next Unbound
+        reload). These records are never in our include file, so only the guard knows
+        them."""
+        return list(self._fwd_recs.get(fqdn(name), []))
+
+    def static_records(self, name: str):
+        """All OPNsense-owned static records (forward A/AAAA OR reverse PTR) at this
+        name, for the runtime reconcile to re-assert after its blanket
+        local_data_remove. A name is either forward or reverse, so at most one side is
+        non-empty. Extends forward_records to the reverse side: aggressive cleanup and
+        clean reconcile a stale IP's PTR name, and a co-located static/reserved PTR
+        (e.g. an address that has since become a reservation) must not be evicted from
+        the running resolver."""
+        n = fqdn(name)
+        return list(self._fwd_recs.get(n, [])) + list(self._ptr_recs.get(n, []))
 
     def is_static_ptr(self, ptr: str) -> bool:
         return fqdn(ptr) in self._ptr

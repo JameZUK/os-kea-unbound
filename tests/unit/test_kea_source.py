@@ -106,17 +106,100 @@ def test_lease_source_ok_and_reachable(tmp_path, monkeypatch):
     assert kea_source.lease_source_ok("6")
 
 
-def test_stale_detection_set_diff(monkeypatch):
+def test_desired_records_key_identity(monkeypatch):
+    # desired_records produces stable keys for lease-sync/audit. (NOTE: clean's
+    # pruning is NOT name-keyed any more — it's IP-keyed in clean.is_stale_record;
+    # see test_clean.py. This only covers desired_records' own output.)
     monkeypatch.setattr(kea_source, "_reserved_for_family", lambda f: (set(), True))
     monkeypatch.setattr(kea_source, "leases",
                         lambda f: [("keep", "10.0.0.5")] if f == "4" else [])
     desired = {r.key() for r in kea_source.desired_records("home.lan")}
-    actual = R.parse_local_data_lines(
-        'local-data: "keep.home.lan. 3600 IN A 10.0.0.5"\n'
-        'local-data: "gone.home.lan. 3600 IN A 10.0.0.9"\n'
-    )
-    stale = [r for r in actual if r.key() not in desired]
-    assert len(stale) == 1 and stale[0].rdata == "10.0.0.9"
+    assert ("keep.home.lan.", "A", "10.0.0.5") in desired
+    assert ("5.0.0.10.in-addr.arpa.", "PTR", "keep.home.lan.") in desired
+
+
+def test_reserved_for_family_error_translation(tmp_path):
+    # unparseable config -> (empty, NOT readable); missing -> (empty, readable);
+    # valid-but-empty -> (set, readable)
+    bad = tmp_path / "bad4.conf"
+    bad.write_text("{ not json")
+    kea_source.KEA4 = str(bad)
+    assert kea_source._reserved_for_family("4") == (set(), False)
+    kea_source.KEA4 = str(tmp_path / "absent4.conf")
+    assert kea_source._reserved_for_family("4") == (set(), True)
+    ok = tmp_path / "ok4.conf"
+    ok.write_text(json.dumps({"Dhcp4": {"reservations": [
+        {"hostname": "h", "ip-address": "10.0.0.5"}]}}))
+    kea_source.KEA4 = str(ok)
+    assert kea_source._reserved_for_family("4") == ({"10.0.0.5"}, True)
+
+
+def test_leases_socket_skips_ia_pd(monkeypatch):
+    # the control-socket path must keep only IA_NA (host addresses), never IA_PD.
+    resp = {"result": 0, "arguments": {"leases": [
+        {"hostname": "host-na", "ip-address": "2001:db8::50", "state": 0, "type": "IA_NA"},
+        {"hostname": "deleg-pd", "ip-address": "2001:db8:abcd::", "state": 0, "type": "IA_PD"},
+    ]}}
+    monkeypatch.setattr(kea_source.kea_ctrl, "send_command", lambda *a, **k: resp)
+    out = dict(kea_source.leases("6"))
+    assert out.get("host-na") == "2001:db8::50"
+    assert "deleg-pd" not in out
+
+
+def test_clean_inputs_single_fetch(monkeypatch):
+    # live IPs exclude reservations; both families confirmed from one fetch each.
+    monkeypatch.setattr(kea_source, "_reserved_for_family",
+                        lambda f: ({"10.0.0.9"}, True) if f == "4" else (set(), True))
+    monkeypatch.setattr(kea_source, "_family_leases",
+                        lambda f: ([("dyn", "10.0.0.5"), ("resv", "10.0.0.9")], True)
+                        if f == "4" else ([("v6", "2001:db8::5")], True))
+    live, prunable = kea_source.clean_inputs()
+    assert live["4"] == {"10.0.0.5"}          # reserved 10.0.0.9 excluded
+    assert live["6"] == {"2001:db8::5"}
+    assert prunable == {"4": True, "6": True}
+
+
+def test_clean_inputs_unconfirmed_source_not_prunable(monkeypatch):
+    # socket down + stale/absent CSV -> source_ok False -> family not prunable
+    monkeypatch.setattr(kea_source, "_reserved_for_family", lambda f: (set(), True))
+    monkeypatch.setattr(kea_source, "_family_leases", lambda f: ([], False))
+    live, prunable = kea_source.clean_inputs()
+    assert prunable == {"4": False, "6": False}
+
+
+def test_clean_inputs_unreadable_reserved_not_prunable(monkeypatch):
+    # reserved config present-but-unreadable -> not prunable, no live IPs collected
+    monkeypatch.setattr(kea_source, "_reserved_for_family", lambda f: (set(), False))
+    monkeypatch.setattr(kea_source, "_family_leases", lambda f: ([("h", "10.0.0.5")], True))
+    live, prunable = kea_source.clean_inputs()
+    assert prunable == {"4": False, "6": False}
+    assert live["4"] == set() and live["6"] == set()
+
+
+def test_family_leases_socket_vs_fresh_csv(monkeypatch, tmp_path):
+    # socket result==0 -> authoritative; socket down + stale CSV -> ([], False)
+    monkeypatch.setattr(kea_source.kea_ctrl, "send_command",
+                        lambda *a, **k: {"result": 0, "arguments": {"leases": [
+                            {"hostname": "h", "ip-address": "10.0.0.5", "state": 0}]}})
+    out, ok = kea_source._family_leases("4")
+    assert ok is True and ("h", "10.0.0.5") in out
+    monkeypatch.setattr(kea_source.kea_ctrl, "send_command", lambda *a, **k: None)
+    kea_source.CSV4 = str(tmp_path / "absent.csv")
+    assert kea_source._family_leases("4") == ([], False)
+
+
+def test_family_leases_fresh_csv_fallback(monkeypatch, tmp_path):
+    # socket down + a FRESH CSV -> trust it (the production fallback path)
+    monkeypatch.setattr(kea_source.kea_ctrl, "send_command", lambda *a, **k: None)
+    c = tmp_path / "l4.csv"
+    c.write_text(
+        "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,"
+        "fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id\n"
+        f"10.0.0.7,aa,bb,4000,{int(time.time())+99999},1,1,1,csvhost,0,,0\n")
+    kea_source.CSV4 = str(c)  # just written -> fresh
+    out, ok = kea_source._family_leases("4")
+    assert ok is True
+    assert ("csvhost", "10.0.0.7") in out
 
 
 def test_load_settings(tmp_path):

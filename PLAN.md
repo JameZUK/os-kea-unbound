@@ -131,7 +131,7 @@ computation, hostname handling. Atomic/idempotent file writes.
 - [x] **6 — Status page** (Services → Kea Unbound DDNS → Status: listener health, record count, TSIG, Kea-DDNS ownership, recent log, "Sync now") — data verified on the test box
 - [x] **7 — clean uninstall/teardown** (shared teardown.php: revert Kea DDNS iff owned, stop listener, flush records + remove include file, regenerate clean Kea; wired to the disable path AND a +PRE_DEINSTALL) — verified on the test box
 - [x] **8 — audit/clean + logs + docs** (lib/kea_source shared source-of-truth; `audit`/`clean` configd actions with a Kea-reachability guard against wiping; newsyslog rotation; README rewritten) — verified on the test box
-- [x] **9 — package build + lifecycle** (built a 0.1 .pkg with `pkg create`, clean install + run, and `pkg delete` ran the `+PRE_DEINSTALL` teardown with full revert; 25 unit tests pass) — verified on the test box
+- [x] **9 — package build + lifecycle** (built a 0.1 .pkg with `pkg create`, clean install + run, and `pkg delete` ran the `+PRE_DEINSTALL` teardown with full revert; 85 unit tests pass) — verified on the test box
 
 Phases 0–3 need no router. Phase 4 is the first on-box milestone.
 
@@ -197,7 +197,7 @@ permanent host<->IP mapping.
 ## Test parity with v3.8 (`test_hook.sh`)
 
 The old suite (29 shell tests) targeted the run_script hook driven by Kea env-vars; the
-new suite (28 unit + 37 integration) targets native DDNS + the listener. Core behaviours
+new suite (85 unit + 41 integration) targets native DDNS + the listener. Core behaviours
 migrated (v4/v6 lifecycle, dual-stack preserve, static guard incl. independent fwd/PTR
 #11, aggressive cleanup, idempotency #10), and the new suite adds TSIG enforcement,
 persistence, daemon respawn, static-PTR ANY-delete survival, family-safe ANY-delete, and
@@ -213,13 +213,12 @@ mechanism/feature changed, not as gaps:
 - **MAC-address fallback naming** (`device-<mac>`, old #6): Kea now generates names for
   nameless clients (`host-<hex>` via ddns-replace-client-name / ddns-generated-prefix).
 
-### Remaining release steps (need a push / build host)
-- Run the **official `make package`** on an OPNsense plugins tree (the test box has no
-  git/plugins tree, so 9 was validated with a hand-built `pkg create` — the package
-  STRUCTURE and lifecycle are proven; the official build adds OPNsense firmware metadata).
-- Remove the retired v3.x files (`build_plugin.sh`, `healthcheck.sh`, `test_hook.sh`) from
-  this line before release.
-- Tag **0.1** and (optionally) set up CI to run the pytest suite.
+### Release steps
+- [x] Official `make package` runs on an OPNsense plugins tree (built on the test box's
+  `/root/pbuild/plugins-master` tree, non-devel flavour) and is installed/upgraded on prod.
+- [x] Retired v3.x files (`build_plugin.sh`, `healthcheck.sh`, `test_hook.sh`) removed.
+- Tag the release to match `PLUGIN_VERSION` (currently **0.3**) and (optionally) set up CI
+  to run the pytest suite.
 
 ## Layout
 
@@ -270,8 +269,8 @@ tests/
 
 ## Notes / open items for the test environment
 
-- Confirm `PLUGIN_DEPENDS` python version matches the OPNsense base (Makefile
-  currently `py311-dnspython`; tkreagan used py313 — adjust to the box).
+- [x] `PLUGIN_DEPENDS` python version matches the OPNsense base — Makefile uses
+  `py313-dnspython` (26.1 ships python 3.13; dnspython 2.8.0 present).
 - Verify the rc.d/kea precmd-before-daemon ordering (Phase 4).
 - The old v3.8 files (`build_plugin.sh`, `healthcheck.sh`, `test_hook.sh`) remain
   on `main` and are left in the tree for now; they will be retired once this line

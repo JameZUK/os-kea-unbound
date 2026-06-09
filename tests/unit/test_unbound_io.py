@@ -112,3 +112,51 @@ def test_prune_abort_if_vetoes(tmp_path):
     removed, aborted = zone.prune(lambda r: True, abort_if=lambda actual, rem: len(rem) > 2)
     assert aborted and len(removed) == 5
     assert inc.read_text() == before          # file untouched
+
+
+def test_static_provider_reasserts_coresident_record(tmp_path):
+    # A static AAAA at the same name (provided externally, NOT in our file) must be
+    # re-asserted into the running zone after the blanket remove, alongside our A —
+    # otherwise it vanishes from runtime until the next Unbound reload.
+    runner = FakeRunner()
+    inc = tmp_path / "keaunbound.conf"
+    static_aaaa = R.Record("host.example.com", 3600, "AAAA", "2001:db8::5")
+    zone = UnboundZone(
+        include_file=str(inc), unbound_conf="/dev/null", runner=runner,
+        lock_path=str(tmp_path / "lock"),
+        static_provider=lambda name: [static_aaaa] if name == "host.example.com." else [])
+    zone.add(R.Record("host.example.com", 3600, "A", "192.168.1.10"))
+    added = runner.added()
+    assert "host.example.com. 3600 IN A 192.168.1.10" in added       # ours
+    assert "host.example.com. 3600 IN AAAA 2001:db8::5" in added     # static re-asserted
+
+
+def test_static_provider_not_duplicated_when_also_ours(tmp_path):
+    runner = FakeRunner()
+    inc = tmp_path / "keaunbound.conf"
+    dup = R.Record("host.example.com", 3600, "A", "192.168.1.10")
+    zone = UnboundZone(include_file=str(inc), unbound_conf="/dev/null", runner=runner,
+                       lock_path=str(tmp_path / "lock"), static_provider=lambda name: [dup])
+    zone.add(R.Record("host.example.com", 3600, "A", "192.168.1.10"))
+    a_lines = [ln for ln in runner.added() if "IN A 192.168.1.10" in ln]
+    assert len(a_lines) == 1
+
+
+def test_remove_other_addresses_reasserts_coresident_static_ptr(tmp_path):
+    # Aggressive cleanup reconciles the reverse name of a dropped IP. If that reverse
+    # name also holds an OPNsense static/reserved PTR, the blanket remove must NOT
+    # evict it from runtime — static_provider re-asserts it.
+    runner = FakeRunner()
+    inc = tmp_path / "keaunbound.conf"
+    rev11 = R.ptr_name("192.168.1.11")
+    static_ptr = R.Record(rev11, 3600, "PTR", "reserved.host.")
+    zone = UnboundZone(include_file=str(inc), unbound_conf="/dev/null", runner=runner,
+                       lock_path=str(tmp_path / "lock"),
+                       static_provider=lambda name: [static_ptr] if name == rev11 else [])
+    zone.add(R.Record("h.example.com", 3600, "A", "192.168.1.10"))
+    zone.add(R.Record("h.example.com", 3600, "A", "192.168.1.11"))
+    zone.add(R.Record(rev11, 3600, "PTR", "h.example.com."))
+    runner.calls.clear()
+    zone.remove_other_addresses("h.example.com", "A", "192.168.1.10")  # drops .11 + its PTR
+    added = runner.added()
+    assert any("reserved.host." in ln and " PTR " in ln for ln in added)
