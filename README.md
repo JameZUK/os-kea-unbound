@@ -42,7 +42,7 @@ for as long as the lease is valid.
 ## Install
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.12.0/os-kea-unbound-0.12.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.12.1/os-kea-unbound-0.12.1.pkg
 ```
 
 (Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source).)
