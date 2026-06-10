@@ -41,6 +41,20 @@ def test_add_writes_file_and_runtime(tmp_path):
     assert "host.example.com. 3600 IN A 192.168.1.10" in runner.added()
 
 
+def test_write_file_has_server_clause(tmp_path):
+    # OPNsense includes this drop-in at top level, so local-data must live inside
+    # a `server:` clause or Unbound refuses to start. The clause must precede the
+    # records, and the records must still round-trip back through the parser.
+    zone, runner, inc = make_zone(tmp_path)
+    zone.add(R.Record("host.example.com", 3600, "A", "192.168.1.10"))
+    text = inc.read_text()
+    assert "server:" in text
+    assert text.index("server:") < text.index("local-data:")
+    # reload proves the server: header + indentation don't break read-back
+    zone2, _, _ = make_zone(tmp_path)
+    assert len(zone2._records_for("host.example.com")) == 1
+
+
 def test_idempotent_add(tmp_path):
     zone, runner, inc = make_zone(tmp_path)
     rec = R.Record("host.example.com", 3600, "A", "192.168.1.10")
