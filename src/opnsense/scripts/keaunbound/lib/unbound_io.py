@@ -71,8 +71,9 @@ class UnboundZone:
 
     def _write_file(self):
         header = "# Managed by os-kea-unbound (DDNS). Do not edit by hand.\n"
-        body = "\n".join(r.local_data_line() for r in self._records)
-        data = header + body + ("\n" if body else "")
+        server_section = "server:\n"
+        body = "\n".join(f"  {r.local_data_line()}" for r in self._records)
+        data = header + server_section + body + ("\n" if body else "")   
         d = os.path.dirname(self.include_file) or "."
         os.makedirs(d, exist_ok=True)
         # preserve the existing file's permissions (mkstemp creates 0600, which
