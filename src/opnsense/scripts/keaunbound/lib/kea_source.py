@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from . import records as R
 from . import kea_ctrl
+from . import suffix as suffixmod
 
 CONFIG = "/conf/config.xml"
 KEA4 = "/usr/local/etc/kea/kea-dhcp4.conf"
@@ -109,7 +110,8 @@ def leases_csv(family):
                     continue
     except OSError:
         return []
-    return [(r.get("hostname", ""), addr) for addr, r in seen.items() if r.get("hostname")]
+    return [(r.get("hostname", ""), addr, r.get("subnet_id"))
+            for addr, r in seen.items() if r.get("hostname")]
 
 
 # A memfile CSV persists on disk after Kea stops, so its mere existence is not
@@ -146,7 +148,7 @@ def _family_leases(family):
                 continue
             host, addr = lease.get("hostname"), lease.get("ip-address")
             if host and addr:
-                out.append((host, addr))
+                out.append((host, addr, lease.get("subnet-id")))
         return out, True
     if _csv_fresh(family):
         return leases_csv(family), True
@@ -154,8 +156,20 @@ def _family_leases(family):
 
 
 def leases(family):
-    """(hostname, ip) for active leases via control socket, fresh-CSV fallback."""
+    """(hostname, ip, subnet_id) for active leases via control socket, fresh-CSV
+    fallback. subnet_id maps a lease to its per-subnet qualifying suffix (issue #17)
+    and may be None when the source doesn't report it."""
     return _family_leases(family)[0]
+
+
+def _suffix_map(family, global_suffix):
+    """{subnet_id: qualifying_suffix} for a family, from the generated Kea config.
+    Empty when the config is absent/unreadable -> callers fall back to the global."""
+    path = KEA4 if family == "4" else KEA6
+    cfg = _load_json(path) or {}
+    root = cfg.get("Dhcp4" if family == "4" else "Dhcp6") or {}
+    subnet_key = "subnet4" if family == "4" else "subnet6"
+    return suffixmod.suffix_by_subnet_id(root, subnet_key, global_suffix)
 
 
 def lease_source_ok(family):
@@ -184,7 +198,7 @@ def clean_inputs():
         prunable[fam] = source_ok and resv_ok
         if not resv_ok:
             continue
-        for _host, ip in leases_list:
+        for _host, ip, _sid in leases_list:
             n = R._norm_ip(ip)
             if n is not None and n not in resv:
                 live[fam].add(n)
@@ -220,12 +234,22 @@ def desired_records(suffix):
         resv, ok = _reserved_for_family(fam)
         if not ok:
             continue  # config present but unreadable -> skip this family
-        for host, ip in leases(fam):
+        # Per-subnet qualifying suffix (issue #17): qualify each lease with its own
+        # subnet's domain so the seeded name matches what the live DDNS path (Kea)
+        # writes. Unknown/absent subnet-id falls back to the global suffix.
+        smap = _suffix_map(fam, suffix)
+        for host, ip, sid in leases(fam):
             n = R._norm_ip(ip)
             if n is None or n in resv:
                 continue  # reservation -> OPNsense's, not ours
             try:
-                name = R.host_fqdn(host, suffix)
+                sfx = suffix
+                if sid is not None:
+                    try:
+                        sfx = smap.get(int(sid), suffix)
+                    except (TypeError, ValueError):
+                        sfx = suffix
+                name = R.host_fqdn(host, sfx)
                 if not name:
                     continue
                 recs.append(R.Record(name, 3600, R.rrtype_for_ip(ip), ip))

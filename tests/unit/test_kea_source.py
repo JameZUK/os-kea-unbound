@@ -37,7 +37,7 @@ def test_leases_csv_filters_expired_and_state(tmp_path):
         f"10.0.0.52,aa,bb,4000,{future},1,1,1,declined52,1,,0\n"
     )
     kea_source.CSV4 = str(c)
-    addrs = {a for _, a in kea_source.leases_csv("4")}
+    addrs = {a for _, a, _ in kea_source.leases_csv("4")}
     assert "10.0.0.50" in addrs
     assert "10.0.0.51" not in addrs and "10.0.0.52" not in addrs
 
@@ -49,7 +49,7 @@ def test_desired_records_dynamic_only(monkeypatch):
     monkeypatch.setattr(kea_source, "_reserved_for_family",
                         lambda f: ({"10.0.0.9"}, True) if f == "4" else (set(), True))
     monkeypatch.setattr(kea_source, "leases",
-                        lambda f: [("dyn", "10.0.0.5"), ("resv", "10.0.0.9")] if f == "4" else [])
+                        lambda f: [("dyn", "10.0.0.5", 1), ("resv", "10.0.0.9", 1)] if f == "4" else [])
     lines = [r.local_data_line() for r in kea_source.desired_records("home.lan")]
     assert any('dyn.home.lan. 3600 IN A 10.0.0.5' in ln for ln in lines)         # forward
     assert any('5.0.0.10.in-addr.arpa. 3600 IN PTR dyn.home.lan.' in ln for ln in lines)  # reverse
@@ -63,10 +63,25 @@ def test_desired_records_skips_family_with_unreadable_config(monkeypatch):
     monkeypatch.setattr(kea_source, "_reserved_for_family",
                         lambda f: (set(), False) if f == "4" else (set(), True))
     monkeypatch.setattr(kea_source, "leases",
-                        lambda f: [("v4host", "10.0.0.5")] if f == "4" else [("v6host", "2001:db8::5")])
+                        lambda f: [("v4host", "10.0.0.5", 1)] if f == "4" else [("v6host", "2001:db8::5", 1)])
     lines = [r.local_data_line() for r in kea_source.desired_records("home.lan")]
     assert not any("v4host" in ln or "10.0.0.5" in ln for ln in lines)  # v4 skipped
     assert any("v6host" in ln for ln in lines)                          # v6 still emitted
+
+
+def test_desired_records_per_subnet_suffix(monkeypatch):
+    # issue #17: each lease is qualified with its own subnet's suffix; an unknown
+    # subnet-id (or one absent from the map) falls back to the global suffix.
+    monkeypatch.setattr(kea_source, "_reserved_for_family", lambda f: (set(), True))
+    monkeypatch.setattr(kea_source, "leases",
+                        lambda f: ([("a", "10.0.0.5", 1), ("b", "10.1.0.5", 2),
+                                    ("c", "10.2.0.5", 99)] if f == "4" else []))
+    monkeypatch.setattr(kea_source, "_suffix_map",
+                        lambda fam, g: {1: "vlan1.lan", 2: "vlan2.lan"} if fam == "4" else {})
+    lines = [r.local_data_line() for r in kea_source.desired_records("global.lan")]
+    assert any("a.vlan1.lan. 3600 IN A 10.0.0.5" in ln for ln in lines)
+    assert any("b.vlan2.lan. 3600 IN A 10.1.0.5" in ln for ln in lines)
+    assert any("c.global.lan. 3600 IN A 10.2.0.5" in ln for ln in lines)  # unknown sid -> global
 
 
 def test_leases_csv_skips_ia_pd(tmp_path):
@@ -80,7 +95,7 @@ def test_leases_csv_skips_ia_pd(tmp_path):
         f"2001:db8:abcd::,aa,4000,{future},1,4000,2,1,56,1,1,deleg-pd,0,,0\n"
     )
     kea_source.CSV6 = str(c)
-    addrs = {a for _, a in kea_source.leases_csv("6")}
+    addrs = {a for _, a, _ in kea_source.leases_csv("6")}
     assert "2001:db8::50" in addrs            # IA_NA host kept
     assert "2001:db8:abcd::" not in addrs     # IA_PD prefix skipped
 
@@ -112,7 +127,7 @@ def test_desired_records_key_identity(monkeypatch):
     # see test_clean.py. This only covers desired_records' own output.)
     monkeypatch.setattr(kea_source, "_reserved_for_family", lambda f: (set(), True))
     monkeypatch.setattr(kea_source, "leases",
-                        lambda f: [("keep", "10.0.0.5")] if f == "4" else [])
+                        lambda f: [("keep", "10.0.0.5", 1)] if f == "4" else [])
     desired = {r.key() for r in kea_source.desired_records("home.lan")}
     assert ("keep.home.lan.", "A", "10.0.0.5") in desired
     assert ("5.0.0.10.in-addr.arpa.", "PTR", "keep.home.lan.") in desired
@@ -141,7 +156,7 @@ def test_leases_socket_skips_ia_pd(monkeypatch):
         {"hostname": "deleg-pd", "ip-address": "2001:db8:abcd::", "state": 0, "type": "IA_PD"},
     ]}}
     monkeypatch.setattr(kea_source.kea_ctrl, "send_command", lambda *a, **k: resp)
-    out = dict(kea_source.leases("6"))
+    out = {h: ip for h, ip, _sid in kea_source.leases("6")}
     assert out.get("host-na") == "2001:db8::50"
     assert "deleg-pd" not in out
 
@@ -151,8 +166,8 @@ def test_clean_inputs_single_fetch(monkeypatch):
     monkeypatch.setattr(kea_source, "_reserved_for_family",
                         lambda f: ({"10.0.0.9"}, True) if f == "4" else (set(), True))
     monkeypatch.setattr(kea_source, "_family_leases",
-                        lambda f: ([("dyn", "10.0.0.5"), ("resv", "10.0.0.9")], True)
-                        if f == "4" else ([("v6", "2001:db8::5")], True))
+                        lambda f: ([("dyn", "10.0.0.5", 1), ("resv", "10.0.0.9", 1)], True)
+                        if f == "4" else ([("v6", "2001:db8::5", 1)], True))
     live, prunable = kea_source.clean_inputs()
     assert live["4"] == {"10.0.0.5"}          # reserved 10.0.0.9 excluded
     assert live["6"] == {"2001:db8::5"}
@@ -170,7 +185,7 @@ def test_clean_inputs_unconfirmed_source_not_prunable(monkeypatch):
 def test_clean_inputs_unreadable_reserved_not_prunable(monkeypatch):
     # reserved config present-but-unreadable -> not prunable, no live IPs collected
     monkeypatch.setattr(kea_source, "_reserved_for_family", lambda f: (set(), False))
-    monkeypatch.setattr(kea_source, "_family_leases", lambda f: ([("h", "10.0.0.5")], True))
+    monkeypatch.setattr(kea_source, "_family_leases", lambda f: ([("h", "10.0.0.5", 1)], True))
     live, prunable = kea_source.clean_inputs()
     assert prunable == {"4": False, "6": False}
     assert live["4"] == set() and live["6"] == set()
@@ -180,9 +195,10 @@ def test_family_leases_socket_vs_fresh_csv(monkeypatch, tmp_path):
     # socket result==0 -> authoritative; socket down + stale CSV -> ([], False)
     monkeypatch.setattr(kea_source.kea_ctrl, "send_command",
                         lambda *a, **k: {"result": 0, "arguments": {"leases": [
-                            {"hostname": "h", "ip-address": "10.0.0.5", "state": 0}]}})
+                            {"hostname": "h", "ip-address": "10.0.0.5", "state": 0,
+                             "subnet-id": 1}]}})
     out, ok = kea_source._family_leases("4")
-    assert ok is True and ("h", "10.0.0.5") in out
+    assert ok is True and ("h", "10.0.0.5", 1) in out
     monkeypatch.setattr(kea_source.kea_ctrl, "send_command", lambda *a, **k: None)
     kea_source.CSV4 = str(tmp_path / "absent.csv")
     assert kea_source._family_leases("4") == ([], False)
@@ -199,7 +215,7 @@ def test_family_leases_fresh_csv_fallback(monkeypatch, tmp_path):
     kea_source.CSV4 = str(c)  # just written -> fresh
     out, ok = kea_source._family_leases("4")
     assert ok is True
-    assert ("csvhost", "10.0.0.7") in out
+    assert ("csvhost", "10.0.0.7", "1") in out   # subnet_id from CSV (string)
 
 
 def test_load_settings(tmp_path):
