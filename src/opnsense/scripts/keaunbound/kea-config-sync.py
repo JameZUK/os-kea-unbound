@@ -31,6 +31,9 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib import suffix as suffixmod  # noqa: E402
+
 CONFIG = "/conf/config.xml"
 KEA4 = "/usr/local/etc/kea/kea-dhcp4.conf"
 KEA6 = "/usr/local/etc/kea/kea-dhcp6.conf"
@@ -184,10 +187,22 @@ def patch_dhcp(path, root_key, s):
     # inheritance. Strip ONLY that false default (never an explicit user true) so
     # those subnets inherit the global value.
     subnet_key = "subnet4" if root_key == "Dhcp4" else "subnet6"
+    global_suffix = s.get("suffix") or ""
     for container in [node] + list(node.get("shared-networks", []) or []):
         for sn in (container.get(subnet_key, []) or []):
             if sn.get("ddns-send-updates") is False:
                 sn.pop("ddns-send-updates", None)
+            # Per-subnet qualifying suffix (issue #17): give the subnet its own
+            # ddns-qualifying-suffix (from its domain-name option) when it differs
+            # from the global; Kea honours subnet scope over the root value. When it
+            # matches the global, drop the key so the subnet just inherits (and so a
+            # later domain change can't leave a stale override — core never writes
+            # this key into the generated config, so any present is ours to manage).
+            sfx = suffixmod.subnet_suffix(sn, global_suffix)
+            if suffixmod.norm(sfx) and suffixmod.norm(sfx) != suffixmod.norm(global_suffix):
+                sn["ddns-qualifying-suffix"] = suffixmod.clean(sfx)
+            else:
+                sn.pop("ddns-qualifying-suffix", None)
     if json.dumps(node, sort_keys=True) == before:
         return False
     _write_atomic(path, json.dumps(cfg, indent=2))
@@ -211,17 +226,23 @@ def patch_d2(path, s):
 
     # Forward: Kea D2 matches forward domains by DNS suffix and does NOT honour
     # "." as a catch-all (it never matches a normal FQDN — confirmed on Kea 3.0.3:
-    # "DHCP_DDNS_NO_MATCH"). So register the qualifying-suffix zone explicitly —
-    # every name Kea emits is qualified into it (ddns-qualifying-suffix +
-    # ddns-replace-client-name). "." is kept only as a harmless fallback in case a
-    # future Kea honours it; today it simply never matches.
-    suffix_zone = (s["suffix"].strip(".").lower() + ".") if s.get("suffix") else None
-    our_fwd_names = {CATCHALL_FWD} | ({suffix_zone} if suffix_zone else set())
+    # "DHCP_DDNS_NO_MATCH"). So register a forward zone PER qualifying suffix — the
+    # global one plus every distinct per-subnet domain (issue #17). Every name Kea
+    # emits is qualified into its subnet's suffix (ddns-qualifying-suffix +
+    # ddns-replace-client-name), so each suffix needs its own zone pointed at our
+    # listener. "." is kept only as a harmless fallback in case a future Kea honours
+    # it; today it simply never matches.
+    suffix_zones = []
+    for sfx in (s.get("suffixes") or ([s["suffix"]] if s.get("suffix") else [])):
+        z = suffixmod.norm(sfx) + "." if suffixmod.norm(sfx) else ""
+        if z and z not in suffix_zones:
+            suffix_zones.append(z)
+    our_fwd_names = {CATCHALL_FWD} | set(suffix_zones)
     fwd = (d2.get("forward-ddns") or {}).get("ddns-domains") or []
     user_fwd = [d for d in fwd if d.get("name") not in our_fwd_names]
     if user_fwd:
         log("preserving %d user forward DDNS domain(s)" % len(user_fwd))
-    our_fwd = ([catchall(suffix_zone)] if suffix_zone else []) + [catchall(CATCHALL_FWD)]
+    our_fwd = [catchall(z) for z in suffix_zones] + [catchall(CATCHALL_FWD)]
     d2["forward-ddns"] = {"ddns-domains": user_fwd + our_fwd}
 
     # Reverse: keep user domains, (re)add our in-addr.arpa./ip6.arpa. catch-alls.
@@ -244,12 +265,33 @@ def patch_d2(path, s):
     return True
 
 
+def _collect_suffixes(global_suffix):
+    """Every distinct qualifying suffix to register a D2 forward zone for: the
+    global one plus each subnet's domain-name across both families (issue #17).
+    Order: global first, then first-seen per-subnet; de-duped case-insensitively."""
+    out, seen = [], set()
+
+    def add(sfx):
+        n = suffixmod.norm(sfx)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(suffixmod.clean(sfx))
+
+    add(global_suffix)
+    for path, key, subnet_key in ((KEA4, "Dhcp4", "subnet4"), (KEA6, "Dhcp6", "subnet6")):
+        root = (_load_json(path) or {}).get(key) or {}
+        for sn in suffixmod.iter_subnets(root, subnet_key):
+            add(suffixmod.subnet_suffix(sn, global_suffix))
+    return out
+
+
 def main():
     s = load_settings()
     if s is None:
         print("keaunbound: disabled/unreadable — no DDNS injection")
         return 0
     s["d2_ip"], s["d2_port"] = _d2_listen(D2)
+    s["suffixes"] = _collect_suffixes(s["suffix"])
     changed = []
     if patch_dhcp(KEA4, "Dhcp4", s):
         changed.append("dhcp4")
