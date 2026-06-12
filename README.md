@@ -24,7 +24,9 @@ for as long as the lease is valid.
 
 - **Automatic** — dynamic leases are registered on grant/renew and removed on
   release/expiry, forward (A/AAAA) and reverse (PTR).
-- **Zero per-subnet setup** — DDNS is configured globally; you don't touch each subnet.
+- **Global by default, per-VLAN when you want it** — zero per-subnet setup out of the
+  box; optionally give each subnet its own domain so leases resolve under their VLAN's
+  zone (see *[Per-VLAN domains](#per-vlan-domains)*).
 - **Leaves your static DNS alone** — DHCP reservations and Host Overrides stay
   OPNsense's; the plugin never adds, deletes, or prunes them.
 - **Survives restarts** — records persist across Unbound restarts and reboots, no
@@ -42,7 +44,7 @@ for as long as the lease is valid.
 ## Install
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.12.1/os-kea-unbound-0.12.1.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.13.0/os-kea-unbound-0.13.0.pkg
 ```
 
 (Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source).)
@@ -85,6 +87,26 @@ it — the plugin wires up Kea's DDNS, generates a TSIG key, and seeds existing 
 | Listener port † | 53535 | Loopback only. |
 
 † Shown only under **advanced mode** (toggle at the top of the form). The defaults are fine for almost everyone.
+
+### Per-VLAN domains
+
+By default every dynamic lease is qualified with a single suffix (the **Qualifying
+suffix** above, or the firewall's system domain). If you run multiple VLANs and want
+each to register under its **own** domain, just set a per-subnet **Domain name** — the
+plugin picks it up automatically:
+
+**Services → Kea DHCP → KEA DHCPv4 (or DHCPv6) → Subnets → (edit a subnet)**
+
+1. Untick **Automatically collect option data** — otherwise OPNsense overwrites the
+   domain with the firewall's system domain, so every VLAN looks the same.
+2. Set **Domain name** to that VLAN's domain, e.g. `iot.lan`.
+3. **Save**, then apply.
+
+Leases on that subnet now resolve under its own domain (e.g. `camera.iot.lan`), forward
+and reverse. Subnets you don't touch keep using the global suffix, so this is fully
+opt-in. Behind the scenes the plugin gives each subnet its own Kea
+`ddns-qualifying-suffix` and registers a DDNS forward zone per distinct domain, so every
+suffix is routed to the listener correctly.
 
 ## Status & Records
 
