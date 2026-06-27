@@ -44,7 +44,7 @@ for as long as the lease is valid.
 ## Install
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.13.0/os-kea-unbound-0.13.0.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.14.0/os-kea-unbound-0.14.0.pkg
 ```
 
 (Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source).)
@@ -111,7 +111,15 @@ suffix is routed to the listener correctly.
 ## Status & Records
 
 **Status** shows listener health, the registered record count, TSIG state, the
-effective qualifying suffix, a **Sync now** button, and a live activity log.
+effective qualifying suffix, a **Sync now** button, a **Remove stale records** button,
+and a live activity log.
+
+**Remove stale records** prunes any records Unbound still holds that Kea no longer knows
+about (an expired or released lease, or a host that moved to another VLAN). It applies
+the removals to the running Unbound straight away, so there's no need to stop the plugin
+or restart Unbound. It's safe in an HA setup: if it can't confirm a current lease list
+from Kea it does nothing rather than risk removing good records, and it refuses to bulk
+remove an unusually large number at once.
 
 **Records** lists every registered record, enriched with the matching Kea lease detail
 (hostname, MAC/DUID, subnet, source, expiry, TTL) — searchable and sortable.
