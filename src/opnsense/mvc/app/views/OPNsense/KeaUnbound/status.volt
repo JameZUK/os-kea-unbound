@@ -69,6 +69,15 @@
             $("#syncAct_progress").addClass("fa fa-spinner fa-pulse");
             ajaxCall("/api/keaunbound/service/sync", {}, function (data, status) {
                 $("#syncAct_progress").removeClass("fa fa-spinner fa-pulse");
+                if (data && data.output) { $("#actResult").text(data.output); }
+                refreshStatus();
+            });
+        });
+        $("#cleanAct").click(function () {
+            $("#cleanAct_progress").addClass("fa fa-spinner fa-pulse");
+            ajaxCall("/api/keaunbound/service/clean", {}, function (data, status) {
+                $("#cleanAct_progress").removeClass("fa fa-spinner fa-pulse");
+                if (data && data.output) { $("#actResult").text(data.output); }
                 refreshStatus();
             });
         });
@@ -96,6 +105,15 @@
             {{ lang._('Re-seed existing Kea leases and reservations into Unbound.') }}
         </span>
     </div>
+    <div style="padding: 0.5em 8px 0;">
+        <button class="btn btn-default" id="cleanAct" type="button">
+            <b>{{ lang._('Remove stale records') }}</b> <i id="cleanAct_progress"></i>
+        </button>
+        <span class="text-muted" style="margin-left:1em;">
+            {{ lang._('Prune records Kea no longer knows about (no restart needed).') }}
+        </span>
+    </div>
+    <div id="actResult" class="text-muted" style="padding: 0.5em 8px 0; font-style:italic;"></div>
 </div>
 
 <div class="content-box" style="margin-top:1em; padding:1em;">
