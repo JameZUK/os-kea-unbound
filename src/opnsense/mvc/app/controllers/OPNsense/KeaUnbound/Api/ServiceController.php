@@ -81,4 +81,20 @@ class ServiceController extends ApiMutableServiceControllerBase
         $output = (new Backend())->configdRun('keaunbound sync');
         return ['status' => 'ok', 'output' => trim((string)$output)];
     }
+
+    /**
+     * Prune stale records — entries still in Unbound that Kea no longer knows
+     * about (expired/released leases, hosts that moved VLAN) — and apply the
+     * removals to the running Unbound with no restart (the Status page
+     * "Remove stale records" button). Safe by design: clean aborts rather than
+     * mass-evict if no Kea lease source is confirmed this run.
+     */
+    public function cleanAction()
+    {
+        if (!$this->request->isPost()) {
+            return ['status' => 'failed'];
+        }
+        $output = (new Backend())->configdRun('keaunbound clean');
+        return ['status' => 'ok', 'output' => trim((string)$output)];
+    }
 }
