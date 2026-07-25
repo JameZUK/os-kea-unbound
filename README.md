@@ -43,11 +43,22 @@ for as long as the lease is valid.
 
 ## Install
 
+**OPNsense 26.7+ (FreeBSD 15):**
+
+```sh
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.14.1/os-kea-unbound-0.14.1.pkg
+```
+
+**OPNsense 26.1 (FreeBSD 14):**
+
 ```sh
 pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.14.0/os-kea-unbound-0.14.0.pkg
 ```
 
-(Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source).)
+Packages are architecture-stamped, so use the one that matches your release — a
+FreeBSD 15 package won't install on FreeBSD 14 and vice versa. The two builds are
+otherwise identical. (Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source),
+which always matches your running system.)
 
 ## Migrating from the old v3.x plugin
 
