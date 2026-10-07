@@ -60,6 +60,22 @@ FreeBSD 15 package won't install on FreeBSD 14 and vice versa. The two builds ar
 otherwise identical. (Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source),
 which always matches your running system.)
 
+### The "misconfigured" / "unknown-repository" label
+
+After installing from the `.pkg`, **System → Firmware → Packages** marks the plugin
+`misconfigured` and `unknown-repository`. **This is cosmetic — the plugin is fully
+installed and runs normally.** It happens because you installed from a downloaded file
+rather than from a pkg repository OPNsense tracks, so OPNsense never added the plugin to
+its managed-plugin list (installing *from a file* never does). To clear both labels, have
+OPNsense register the installed plugin into that list:
+
+```sh
+configctl firmware resync
+```
+
+This is safe and reinstalls nothing. OPNsense still won't auto-update the plugin (it isn't
+served from a repository), so you update it by installing the next release file yourself.
+
 ## Migrating from the old v3.x plugin
 
 The old v3.x plugin and this one share the package name `os-kea-unbound`, but they're
@@ -146,6 +162,27 @@ configctl keaunbound clean       # prune records Kea no longer knows about
 configctl keaunbound records     # list registered records (JSON)
 configctl keaunbound log 500     # tail the activity log
 ```
+
+### Verify it's working
+
+1. **Services → Kea Unbound DDNS → Status** — the listener should show **running**, with a
+   record count and the qualifying suffix you expect.
+2. **Records** (same menu) — your current DHCP clients should be listed, each with its
+   matching lease detail.
+3. **Resolve a name.** Pick a client from the Records page, then query the firewall's own
+   resolver, forward and reverse:
+
+   ```sh
+   drill myclient.mydomain @127.0.0.1    # forward → returns the lease address
+   drill -x 192.0.2.50 @127.0.0.1        # reverse → returns the name
+   ```
+
+   The same lookups work from any machine on the network — point them at the firewall's
+   address instead of `127.0.0.1`.
+
+The [CLI](#cli) commands above do the same from a shell: `status` for listener state,
+`records` to list what's registered, and `log` to watch a lease register or drop in real
+time.
 
 ## Uninstall
 
