@@ -28,7 +28,10 @@ for as long as the lease is valid.
   box; optionally give each subnet its own domain so leases resolve under their VLAN's
   zone (see *[Per-VLAN domains](#per-vlan-domains)*).
 - **Leaves your static DNS alone** — DHCP reservations and Host Overrides stay
-  OPNsense's; the plugin never adds, deletes, or prunes them.
+  OPNsense's; the plugin never adds, deletes, or prunes them. To have reserved clients
+  resolve by name too, tick **Services → Unbound DNS → General → Register DHCP Static
+  Mappings**: OPNsense then registers every Kea reservation that has a hostname, forward
+  and reverse.
 - **Survives restarts** — records persist across Unbound restarts and reboots, no
   repopulation wait.
 - **Secure by default** — TSIG-authenticated; the listener rejects unsigned,
