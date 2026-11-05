@@ -46,7 +46,7 @@ for as long as the lease is valid.
 **OPNsense 26.7+ (FreeBSD 15):**
 
 ```sh
-pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.14.1/os-kea-unbound-0.14.1.pkg
+pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.14.2/os-kea-unbound-0.14.2.pkg
 ```
 
 **OPNsense 26.1 (FreeBSD 14):**
@@ -56,9 +56,10 @@ pkg add https://github.com/JameZUK/os-kea-unbound/releases/download/v0.14.0/os-k
 ```
 
 Packages are architecture-stamped, so use the one that matches your release — a
-FreeBSD 15 package won't install on FreeBSD 14 and vice versa. The two builds are
-otherwise identical. (Or [build it from source](docs/HOW-IT-WORKS.md#build-from-source),
-which always matches your running system.)
+FreeBSD 15 package won't install on FreeBSD 14 and vice versa. Prebuilt FreeBSD 14
+packages stop at 0.14.0, so on 26.1 you won't get the reverse-DNS fixes in 0.14.2.
+[Build from source](docs/HOW-IT-WORKS.md#build-from-source) to get them, or upgrade to
+26.7. Building from source always matches your running system.
 
 ### The "misconfigured" / "unknown-repository" label
 
