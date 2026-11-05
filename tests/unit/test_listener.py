@@ -170,3 +170,107 @@ def test_coresident_static_reasserted_on_dynamic_add(tmp_path):
     added = "".join(inp for a, inp in calls if a == ["local_datas"] and inp)
     assert "dual.lan. 3600 IN A 10.0.0.9" in added       # our dynamic record
     assert "dual.lan. 3600 IN AAAA 2001:db8::9" in added  # static AAAA preserved in runtime
+
+
+# ---- issue #28: PTR target guard ------------------------------------------
+STATIC_LDAP = ('local-data: "ldap.example.lan. 3600 IN A 10.0.0.5"\n'
+               'local-data-ptr: "10.0.0.5 3600 ldap.example.lan"\n')
+
+
+def test_add_skips_ptr_to_static_name(tmp_path):
+    # A dynamic client claiming a reserved host's name: its A is refused, and so
+    # must its PTR be, or its IP reverse-resolves to the reserved host.
+    lis, args = make_listener(tmp_path, host_entries=STATIC_LDAP)
+    lis._add("ldap.example.lan.", 2400, "A", "10.0.0.100")
+    lis._add("100.0.0.10.in-addr.arpa.", 2400, "PTR", "ldap.example.lan.")
+    assert filetext(args).strip() == ""
+
+
+def test_add_ptr_to_dynamic_name_still_written(tmp_path):
+    lis, args = make_listener(tmp_path, host_entries=STATIC_LDAP)
+    lis._add("100.0.0.10.in-addr.arpa.", 2400, "PTR", "laptop.example.lan.")
+    assert "100.0.0.10.in-addr.arpa. 2400 IN PTR laptop.example.lan." in filetext(args)
+
+
+# ---- issue #29: honour D2's reverse-removal prerequisite --------------------
+REV = "100.0.0.10.in-addr.arpa."
+
+
+def test_reverse_delete_keeps_ptr_that_names_a_newer_lease(tmp_path):
+    # Old lease (foo) removal arrives after the new lease (bar) added its PTR on the
+    # same IP: the prerequisite says "PTR -> foo", so bar's PTR must survive.
+    lis, args = make_listener(tmp_path)
+    lis._add(REV, 2400, "PTR", "bar.example.lan.")
+    lis._delete(REV, "ANY", None, {"foo.example.lan."})
+    assert f"{REV} 2400 IN PTR bar.example.lan." in filetext(args)
+
+
+def test_reverse_delete_removes_ptr_matching_prerequisite(tmp_path):
+    lis, args = make_listener(tmp_path)
+    lis._add(REV, 2400, "PTR", "foo.example.lan.")
+    lis._delete(REV, "ANY", None, {"FOO.example.lan."})
+    assert REV not in filetext(args)
+
+
+def test_reverse_delete_without_prerequisite_is_name_wide(tmp_path):
+    # Senders that carry no prerequisite keep the old behaviour.
+    lis, args = make_listener(tmp_path)
+    lis._add(REV, 2400, "PTR", "foo.example.lan.")
+    lis._delete(REV, "ANY", None)
+    assert REV not in filetext(args)
+
+
+class _Sock:
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+
+def _d2_reverse_add(fqdn):
+    """kea-dhcp-ddns NameAddTransaction::buildReplaceRevPtrsRequest: no
+    prerequisite; delete PTR + DHCID RRsets, then add PTR + DHCID."""
+    import dns.update
+    u = dns.update.UpdateMessage("in-addr.arpa.")
+    u.delete(REV, "PTR")
+    u.delete(REV, "DHCID")
+    u.add(REV, 2400, "PTR", fqdn)
+    u.add(REV, 2400, "DHCID", "AAIBY2/AuCccgoJbsaxcQc9TUapptP69lOjxfNuVAA2kjEA=")
+    return u.to_wire()
+
+
+def _d2_reverse_remove(fqdn):
+    """kea-dhcp-ddns NameRemoveTransaction::buildRemoveRevPtrsRequest: prerequisite
+    `<rev> IN PTR <fqdn>`, then delete all RRsets at the reverse name."""
+    import dns.update
+    u = dns.update.UpdateMessage("in-addr.arpa.")
+    u.present(REV, "PTR", fqdn)
+    u.delete(REV)
+    return u.to_wire()
+
+
+def test_handle_out_of_order_d2_reverse_remove_keeps_new_ptr(tmp_path):
+    # End to end through handle() with D2-shaped wire messages: the issue #29 order
+    # (new lease's add first, old lease's removal a moment later).
+    import pytest
+    pytest.importorskip("dns.update")
+    lis, args = make_listener(tmp_path)
+    sock = _Sock()
+    lis.handle(_d2_reverse_add("foo.example.lan."), ("127.0.0.1", 1), sock)
+    lis.handle(_d2_reverse_add("bar.example.lan."), ("127.0.0.1", 1), sock)
+    lis.handle(_d2_reverse_remove("foo.example.lan."), ("127.0.0.1", 1), sock)
+    text = filetext(args)
+    assert f"{REV} 2400 IN PTR bar.example.lan." in text
+    assert "foo.example.lan." not in text
+    assert len(sock.sent) == 3   # every UPDATE still acknowledged (NOERROR)
+
+
+def test_handle_d2_reverse_remove_for_current_lease(tmp_path):
+    import pytest
+    pytest.importorskip("dns.update")
+    lis, args = make_listener(tmp_path)
+    sock = _Sock()
+    lis.handle(_d2_reverse_add("foo.example.lan."), ("127.0.0.1", 1), sock)
+    lis.handle(_d2_reverse_remove("foo.example.lan."), ("127.0.0.1", 1), sock)
+    assert REV not in filetext(args)

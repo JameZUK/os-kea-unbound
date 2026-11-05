@@ -207,3 +207,25 @@ def test_static_records_includes_reverse_ptr(tmp_path):
     assert len(rev) == 1 and rev[0].rtype == "PTR"
     fwd = g.static_records("host.lan.")
     assert any(r.rtype == "A" for r in fwd) and all(r.rtype != "PTR" for r in fwd)
+
+
+def test_blocks_ptr_target_owned_by_opnsense(tmp_path):
+    # Issue #28: a PTR whose TARGET is a static/reserved forward name is blocked,
+    # same family only (in-addr.arpa -> A, ip6.arpa -> AAAA), mirroring the forward
+    # guard; the reverse-owner checks still apply.
+    he = tmp_path / "he.conf"
+    he.write_text(
+        'local-data: "ldap.example.lan IN A 10.0.0.5"\n'
+        'local-data-ptr: "10.0.0.5 ldap.example.lan"\n'
+        'local-data: "v6only.example.lan IN AAAA 2001:db8::5"\n'
+    )
+    g = R.StaticGuard(str(he))
+    v4 = R.ptr_name("10.0.0.100")
+    v6 = R.ptr_name("2001:db8::100")
+    assert g.blocks_ptr(v4, "ldap.example.lan.")           # target owns a static A
+    assert g.blocks_ptr(v4, "LDAP.example.lan")            # normalised
+    assert not g.blocks_ptr(v4, "dyn.example.lan.")        # ordinary dynamic name
+    assert not g.blocks_ptr(v6, "ldap.example.lan.")       # A-only static: v6 PTR ok
+    assert g.blocks_ptr(v6, "v6only.example.lan.")         # target owns a static AAAA
+    assert not g.blocks_ptr(v4, "v6only.example.lan.")     # AAAA-only static: v4 PTR ok
+    assert g.blocks_ptr(R.ptr_name("10.0.0.5"), "dyn.example.lan.")  # static reverse owner
