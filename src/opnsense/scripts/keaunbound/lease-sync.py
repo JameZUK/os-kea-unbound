@@ -57,7 +57,7 @@ def main():
     count = 0
     for rec in kea_source.desired_records(settings["suffix"]):
         if rec.rtype == "PTR":
-            if guard.is_static_ptr(rec.name) or guard.is_reserved_ptr(rec.name):
+            if guard.blocks_ptr(rec.name, rec.rdata):
                 continue
         elif guard.is_static_forward(rec.name, rec.rtype) or guard.is_reserved_addr(rec.rdata):
             continue

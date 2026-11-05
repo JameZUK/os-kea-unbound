@@ -129,9 +129,11 @@ class Listener:
         if rtype == "PTR":
             # Reservations + Host Overrides are OPNsense's (forward + reverse).
             # We register dynamic leases only, so never write — and thus never
-            # later evict — a reserved or statically-owned reverse name.
-            if guard.is_static_ptr(name) or guard.is_reserved_ptr(name):
-                log.info("Skipped PTR add for %s (static/reserved)", name)
+            # later evict — a reserved or statically-owned reverse name, nor a PTR
+            # pointing at a name OPNsense owns (the forward A for that name is
+            # refused below, so the PTR must be too — issue #28).
+            if guard.blocks_ptr(name, rdata):
+                log.info("Skipped PTR add for %s -> %s (static/reserved)", name, rdata)
                 return
             self.zone.add(R.Record(name, ttl, "PTR", rdata))
             return
@@ -149,7 +151,12 @@ class Listener:
             self.zone.remove_other_addresses(name, rtype, rdata)
         self.zone.add(R.Record(name, ttl, rtype, rdata))
 
-    def _delete(self, name, rtype, rdata):
+    def _delete(self, name, rtype, rdata, asserted_ptr=None):
+        """Apply one RFC 2136 delete.
+
+        asserted_ptr: PTR targets the UPDATE's value-dependent prerequisite asserts
+        at this name (RFC 2136 §2.4.2), or None when it carries none. See
+        _remove_reverse_name."""
         guard = self.guard.get()
         if rtype == "PTR":
             # Never delete a reverse record OPNsense owns statically, nor one for
@@ -157,7 +164,10 @@ class Listener:
             # regeneration race where a reservation isn't in that file yet).
             if guard.is_static_ptr(name) or guard.is_reserved_ptr(name):
                 return
-            self.zone.remove(name, "PTR", rdata)
+            if rdata is None and asserted_ptr is not None:
+                self._remove_reverse_name(name, asserted_ptr)
+            else:
+                self.zone.remove(name, "PTR", rdata)
             return
         if rtype in ("A", "AAAA"):
             if guard.is_static_forward(name, rtype) or (rdata and guard.is_reserved_addr(rdata)):
@@ -173,16 +183,40 @@ class Listener:
             #    removal's name-wide cleanup would wipe the v4 A (and vice versa).
             #    Kea always issues the specific A/AAAA delete first, so those handle
             #    real removal; ignoring the blanket cleanup keeps us family-safe.
-            #    A REVERSE name holds a single PTR, so the blanket delete is safe.
+            #    A REVERSE name holds a single PTR, so the blanket delete is safe —
+            #    provided it still belongs to the lease being removed (see
+            #    _remove_reverse_name).
             if (guard.is_static_forward(name, "A")
                     or guard.is_static_forward(name, "AAAA")
                     or guard.is_static_ptr(name)
                     or guard.is_reserved_ptr(name)):
                 return
             if R.is_reverse_name(name):
-                self.zone.remove(name)
+                self._remove_reverse_name(name, asserted_ptr)
             else:
                 log.info("Ignored name-wide delete for forward %s (family-safe)", name)
+
+    def _remove_reverse_name(self, name, asserted_ptr):
+        """Name-wide delete at a reverse name, honouring D2's prerequisite.
+
+        kea-dhcp-ddns removes a released lease's reverse entry with a value-dependent
+        prerequisite (`<rev> IN PTR <old fqdn>`: "only if the PTR still names the old
+        lease") followed by a delete of everything at the name. We reply NOERROR and
+        never evaluated prerequisites, so when D2 delivered an old lease's removal
+        after the new lease's add on the same IP, it wiped the new PTR (issue #29).
+        When the prerequisite is present, narrow the delete to the asserted target(s):
+        if the name now points elsewhere, nothing matches and the new PTR survives —
+        the outcome RFC 2136 gives for a failed prerequisite, and D2 counts that as
+        success. Without one (another sender), keep the plain name-wide delete."""
+        if asserted_ptr is None:
+            self.zone.remove(name)
+            return
+        removed = False
+        for target in sorted(asserted_ptr):
+            removed = self.zone.remove(name, "PTR", target) or removed
+        if not removed:
+            log.info("Nothing removed at %s: no PTR to %s (a newer lease owns the "
+                     "address, or it is already gone)", name, ", ".join(sorted(asserted_ptr)))
 
     # ---- packet handling --------------------------------------------------
     def handle(self, data, addr, sock):
@@ -223,6 +257,23 @@ class Listener:
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to send response to %s: %s", addr, exc)
 
+        # Value-dependent PTR prerequisites (RFC 2136 §2.4.2: "this RR exists with
+        # this rdata"), keyed by owner name. In an UPDATE the prerequisite section is
+        # section 1, which dnspython exposes as `answer`; a value-dependent
+        # prerequisite parses with deleting=None and carries rdata. kea-dhcp-ddns puts
+        # one on every reverse removal, naming the released lease's FQDN; _delete
+        # uses it so an old lease's late removal can't wipe a newer PTR (issue #29).
+        asserted_ptr = {}
+        try:
+            for rrset in msg.answer:
+                if (rrset.rdtype == dns.rdatatype.PTR and rrset.deleting is None
+                        and len(rrset) > 0):
+                    key = R.fqdn(rrset.name.to_text())
+                    asserted_ptr.setdefault(key, set()).update(rd.to_text() for rd in rrset)
+        except Exception as exc:  # noqa: BLE001 - malformed prerequisite must not crash the daemon
+            log.warning("Ignoring unparseable prerequisites from %s: %s", addr, exc)
+            asserted_ptr = {}
+
         # RFC 2136 operation is carried in each RRset's `.deleting` (dnspython):
         #   None -> add; NONE -> delete a specific RR; ANY -> delete an RRset / all.
         for rrset in msg.authority:
@@ -235,7 +286,7 @@ class Listener:
                     for rdata in rrset:
                         self._add(name, rrset.ttl, rtype, rdata.to_text())
                 elif len(rrset) == 0:
-                    self._delete(name, rtype, None)
+                    self._delete(name, rtype, None, asserted_ptr.get(R.fqdn(name)))
                 else:
                     for rdata in rrset:
                         self._delete(name, rtype, rdata.to_text())

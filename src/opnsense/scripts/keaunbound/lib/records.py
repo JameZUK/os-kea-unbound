@@ -282,3 +282,18 @@ class StaticGuard:
     def is_reserved_ptr(self, ptr: str) -> bool:
         """True if the reverse name belongs to a reserved IP."""
         return fqdn(ptr) in self._reserved_ptr
+
+    def blocks_ptr(self, ptr: str, target: str) -> bool:
+        """True if we must not publish `ptr -> target`.
+
+        Blocked when the reverse name is OPNsense's (static PTR or a reserved IP), OR
+        when the target is a name OPNsense owns for the same address family (issue
+        #28). The forward guard refuses a dynamic A/AAAA for a static name; without the
+        target check the matching PTR still went through, so any DHCP client sending a
+        reserved hostname could make its own IP reverse-resolve to that host. The family
+        match (in-addr.arpa -> A, ip6.arpa -> AAAA) mirrors the forward guard exactly,
+        so forward and reverse stay consistent for the same update."""
+        if self.is_static_ptr(ptr) or self.is_reserved_ptr(ptr):
+            return True
+        family = "AAAA" if fqdn(ptr).endswith(".ip6.arpa.") else "A"
+        return self.is_static_forward(target, family)
